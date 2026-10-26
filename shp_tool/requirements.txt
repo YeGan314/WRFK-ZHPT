@@ -1,0 +1,7 @@
+# 推荐使用 environment.yml 从 conda-forge 安装跨平台 GDAL/GEOS/PROJ 依赖。
+# 此文件仅供依赖版本参考；使用 pip 时可能需要另行安装系统原生库。
+geopandas>=1.0
+shapely>=2.1
+pyogrio>=0.10
+pyproj>=3.7
+pandas>=2.2

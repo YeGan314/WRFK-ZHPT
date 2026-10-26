@@ -1,0 +1,38 @@
+services:
+  postgis:
+    image: imresamu/postgis:17-3.5-bookworm
+    container_name: spatial-postgis
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-gis}
+      POSTGRES_USER: ${POSTGRES_USER:-gisadmin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgis_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gisadmin} -d ${POSTGRES_DB:-gis}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  geoserver:
+    image: docker.osgeo.org/geoserver:2.28.2
+    container_name: spatial-geoserver
+    restart: unless-stopped
+    depends_on:
+      postgis:
+        condition: service_healthy
+    environment:
+      SKIP_DEMO_DATA: "true"
+      GEOSERVER_ADMIN_USER: ${GEOSERVER_ADMIN_USER:-admin}
+      GEOSERVER_ADMIN_PASSWORD: ${GEOSERVER_ADMIN_PASSWORD:?Set GEOSERVER_ADMIN_PASSWORD in .env}
+      EXTRA_JAVA_OPTS: "-Xms512m -Xmx2g"
+    ports:
+      - "127.0.0.1:${GEOSERVER_PORT:-8080}:8080"
+    volumes:
+      - ./geoserver_data:/opt/geoserver_data
+
+volumes:
+  postgis_data:
