@@ -17,6 +17,7 @@ import { toLonLat } from "ol/proj.js";
 import { Circle as CircleStyle, Fill, Stroke, Style } from "ol/style.js";
 import { getArea } from "ol/sphere.js";
 import { get as getProjection } from "ol/proj.js";
+import { apply as applyTransform } from "ol/transform.js";
 import { register } from "ol/proj/proj4.js";
 import proj4 from "proj4";
 import { geoserverEndpoint } from "../geoServer.js";
@@ -30,6 +31,8 @@ let baseLayer;
 let provinceBoundaryLayer;
 let cityBoundaryLayer;
 let countyBoundaryLayer;
+let townshipBoundaryLayer;
+let villageBoundaryLayer;
 let scopeLayer;
 let pointSource;
 let pointLayer;
@@ -95,28 +98,45 @@ function clearDrawing() {
   vectorSource?.clear();
 }
 
-function showAdministrativeBoundary(feature) {
-  if (!map || !vectorSource || !feature?.geometry) return;
+function showAdministrativeBoundary(feature, maxZoom = 12) {
+  if (!map || !vectorSource || (!feature?.geometry && feature?.type !== "FeatureCollection")) return;
   stopDraw();
   vectorSource.clear();
-  const boundary = new GeoJSON().readFeature(feature, {
+  const format = new GeoJSON();
+  const boundaries = feature.type === "FeatureCollection"
+    ? format.readFeatures(feature, { dataProjection: "EPSG:4326", featureProjection: projection })
+    : [format.readFeature(feature, {
     dataProjection: "EPSG:4326",
     featureProjection: projection,
-  });
-  vectorSource.addFeature(boundary);
-  const extent = boundary.getGeometry().getExtent();
-  map.getView().fit(extent, { padding: [80, 80, 80, 80], duration: 500, maxZoom: 12 });
+  })];
+  boundaries.forEach((boundary) => boundary.set("administrativeBoundary", true));
+  vectorSource.addFeatures(boundaries);
+  const extent = vectorSource.getExtent();
+  map.getView().fit(extent, { padding: [80, 80, 80, 80], duration: 500, maxZoom });
 }
 
-function setAdministrativeContext({ province, city, county } = {}) {
-  const sql = (property, value) => value?._region.code
-    ? `${property}='${value._region.code.replace(/'/g, "''")}'`
+function setAdministrativeContext({ province, city, county, township, village } = {}) {
+  const code = (value) => String(value?._region.code || "").replace(/'/g, "''");
+  const exact = (field, value) => value ? `${field}='${code(value)}'` : "INCLUDE";
+  const startsWith = (field, value, length) => value?._region.code
+    ? `\"${field}\" LIKE '${code(value).slice(0, length)}%'`
     : "INCLUDE";
-  provinceBoundaryLayer?.getSource().updateParams({ CQL_FILTER: sql("province_code", province) });
-  cityBoundaryLayer?.getSource().updateParams({ CQL_FILTER: city ? sql("city_code", city) : sql("province_code", province) });
-  countyBoundaryLayer?.getSource().updateParams({ CQL_FILTER: county ? sql("county_code", county) : sql("city_code", city) });
+  provinceBoundaryLayer?.getSource().updateParams({ CQL_FILTER: exact("province_code", province) });
+  cityBoundaryLayer?.getSource().updateParams({ CQL_FILTER: city ? exact("city_code", city) : exact("province_code", province) });
+  countyBoundaryLayer?.getSource().updateParams({ CQL_FILTER: county ? exact("county_code", county) : exact("city_code", city) });
+  townshipBoundaryLayer?.getSource().updateParams({
+    CQL_FILTER: township ? exact('"乡镇码"', township) : startsWith("乡镇码", county || city, county ? 6 : 4),
+  });
+  const villageFilter = village
+    ? `CJDCQDM='${code(village)}' AND XZXZQDM='${String(village._region.parentCode || "").replace(/'/g, "''")}'`
+    : township
+      ? `(XZXZQDM LIKE '${code(township).slice(0, 9)}%' OR (XZXZQMC='${String(township._region.name).replace(/'/g, "''")}' AND XZXZQDM LIKE '${code(township).slice(0, 6)}%'))`
+      : startsWith("XZXZQDM", county || city, county ? 6 : 4);
+  villageBoundaryLayer?.getSource().updateParams({ CQL_FILTER: villageFilter });
   cityBoundaryLayer?.setVisible(Boolean(province));
   countyBoundaryLayer?.setVisible(Boolean(city));
+  townshipBoundaryLayer?.setVisible(Boolean(county));
+  villageBoundaryLayer?.setVisible(Boolean(township));
 }
 
 function removeCultivatedPlotLayer() {
@@ -125,9 +145,53 @@ function removeCultivatedPlotLayer() {
   cultivatedPlotSource = null;
 }
 
-function setCultivatedPlotLayer(layerName) {
+function readClipGeometries(clipBoundary) {
+  if (!clipBoundary) return [];
+  if (typeof clipBoundary.getType === "function") return [clipBoundary];
+  const format = new GeoJSON();
+  const dataProjection = clipBoundary.dataProjection || "EPSG:4326";
+  if (clipBoundary.type === "FeatureCollection" || clipBoundary.type === "Feature") {
+    return format.readFeatures(clipBoundary, { dataProjection, featureProjection: projection })
+      .map((feature) => feature.getGeometry()).filter(Boolean);
+  }
+  return [format.readGeometry(clipBoundary, { dataProjection, featureProjection: projection })];
+}
+
+function polygonRings(geometry) {
+  if (geometry.getType() === "Polygon") return geometry.getCoordinates();
+  if (geometry.getType() === "MultiPolygon") return geometry.getCoordinates().flat();
+  if (geometry.getType() === "GeometryCollection") return geometry.getGeometries().flatMap(polygonRings);
+  return [];
+}
+
+function clipRenderedLayer(layer, geometries) {
+  if (!geometries.length) return;
+  layer.on("prerender", (event) => {
+    const context = event.context;
+    if (!context?.beginPath || !context?.clip) return;
+    context.save();
+    context.beginPath();
+    for (const geometry of geometries) {
+      for (const ring of polygonRings(geometry)) {
+        ring.forEach((coordinate, index) => {
+          const mapPixel = map.getPixelFromCoordinate(coordinate);
+          if (!mapPixel) return;
+          const pixel = applyTransform(event.inversePixelTransform, mapPixel);
+          if (index === 0) context.moveTo(pixel[0], pixel[1]);
+          else context.lineTo(pixel[0], pixel[1]);
+        });
+        context.closePath();
+      }
+    }
+    context.clip("evenodd");
+  });
+  layer.on("postrender", (event) => event.context?.restore?.());
+}
+
+function setCultivatedPlotLayer(layerName, clipBoundary = null) {
   removeCultivatedPlotLayer();
   if (!map || !layerName) return;
+  const clipGeometries = readClipGeometries(clipBoundary);
   cultivatedPlotLayer = new TileLayer({
     opacity: 0.92,
     source: new TileWMS({
@@ -137,6 +201,7 @@ function setCultivatedPlotLayer(layerName) {
       transition: 0,
     }),
   });
+  clipRenderedLayer(cultivatedPlotLayer, clipGeometries);
   const layers = map.getLayers();
   layers.insertAt(Math.max(0, layers.getLength() - 1), cultivatedPlotLayer);
   if (scopeMaskCoordinates) layers.insertAt(Math.max(0, layers.getLength() - 1), maskLayer);
@@ -220,8 +285,8 @@ onMounted(() => {
   vectorSource = new VectorSource();
   scopeLayer = new VectorLayer({
     source: vectorSource,
-    style: new Style({
-      fill: new Fill({ color: "rgba(0, 218, 236, 0.16)" }),
+    style: (feature) => new Style({
+      fill: new Fill({ color: feature.get("administrativeBoundary") ? "rgba(0, 0, 0, 0)" : "rgba(0, 218, 236, 0.16)" }),
       stroke: new Stroke({ color: "#28f2ef", width: 3 }),
     }),
   });
@@ -254,10 +319,12 @@ onMounted(() => {
   provinceBoundaryLayer = wmsLayer("province", 0.92, true);
   cityBoundaryLayer = wmsLayer("prefecture", 0.72, false);
   countyBoundaryLayer = wmsLayer("county", 0.56, false);
+  townshipBoundaryLayer = wmsLayer("township", 0.8, false);
+  villageBoundaryLayer = wmsLayer("village", 0.9, false);
   baseLayer = createImageryLayer();
   map = new Map({
     target: "wrfx-map-canvas",
-    layers: [baseLayer, provinceBoundaryLayer, cityBoundaryLayer, countyBoundaryLayer, scopeLayer, pointLayer],
+    layers: [baseLayer, provinceBoundaryLayer, cityBoundaryLayer, countyBoundaryLayer, townshipBoundaryLayer, villageBoundaryLayer, scopeLayer, pointLayer],
     view: new View({ projection, center: [112.8, 27.3], zoom: 8, minZoom: 3, maxZoom: 18 }),
     controls: [],
   });

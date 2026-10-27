@@ -21,14 +21,19 @@ import {
   PhMapTrifold,
 } from "@phosphor-icons/vue";
 import ScopeMap from "./components/ScopeMap.vue";
-import { displayName, filterByParent, findCountyForPolygon, findCultivatedPlotLayer, geoserverEndpoint, loadAdministrativeBoundary, loadAdministrativeRegions, loadCultivatedPlots } from "./geoServer.js";
+import { displayName, filterByParent, findCountyForPolygon, findCultivatedPlotLayer, geoserverEndpoint, loadAdministrativeBoundary, loadAdministrativeRegions } from "./geoServer.js";
 import { normalizeLocations } from "../lib/analysis.js";
 
 const mode = ref("administrative");
 const province = ref("");
 const city = ref("");
 const county = ref("");
-const regionData = ref({ provinces: [], cities: [], counties: [] });
+const township = ref("");
+const village = ref("");
+const administrativeSearchQuery = ref("");
+const administrativeSearchOpen = ref(false);
+const searchedVillage = ref(null);
+const regionData = ref({ provinces: [], cities: [], counties: [], townships: [], villages: [] });
 const regionsLoading = ref(true);
 const regionsError = ref("");
 const scopeLoading = ref(false);
@@ -51,15 +56,111 @@ const modes = [
 const provinceOptions = computed(() => regionData.value.provinces);
 const cityOptions = computed(() => filterByParent(regionData.value.cities, selectedProvince.value));
 const countyOptions = computed(() => filterByParent(regionData.value.counties, selectedCity.value));
+const townshipOptions = computed(() => filterByParent(regionData.value.townships, selectedCounty.value));
+const villageOptions = computed(() => {
+  const options = filterByParent(regionData.value.villages, selectedTownship.value);
+  if (searchedVillage.value && village.value === searchedVillage.value._region.key
+    && !options.some((item) => item._region.key === searchedVillage.value._region.key)) {
+    return [...options, searchedVillage.value];
+  }
+  return options;
+});
 const selectedProvince = computed(() => regionData.value.provinces.find((item) => displayName(item) === province.value));
 const selectedCity = computed(() => cityOptions.value.find((item) => displayName(item) === city.value));
 const selectedCounty = computed(() => countyOptions.value.find((item) => displayName(item) === county.value));
+const selectedTownship = computed(() => townshipOptions.value.find((item) => item._region.code === township.value));
+const selectedVillage = computed(() => villageOptions.value.find((item) => item._region.key === village.value)
+  || (searchedVillage.value?._region.key === village.value ? searchedVillage.value : null));
 const selectedArea = computed(() => selectedScope.value?.areaMu);
+const administrativeMatches = computed(() => {
+  const query = administrativeSearchQuery.value.trim().replace(/\s/g, "").toLocaleLowerCase();
+  if (query.length < 2) return [];
+  const candidates = [
+    ...regionData.value.counties,
+    ...regionData.value.townships,
+    ...regionData.value.villages,
+  ].filter((feature) => displayName(feature).replace(/\s/g, "").toLocaleLowerCase().includes(query));
+  return candidates
+    .map((feature) => ({ feature, path: administrativePath(feature) }))
+    .sort((a, b) => Number(displayName(a.feature).replace(/\s/g, "").toLocaleLowerCase() !== query)
+      - Number(displayName(b.feature).replace(/\s/g, "").toLocaleLowerCase() !== query))
+    .slice(0, 12);
+});
 const areaText = computed(() => {
   const area = selectedArea.value;
   if (!Number.isFinite(area)) return "待确认";
   return area < 100 ? `${area.toFixed(2)} 亩` : `${(area / 10000).toFixed(2)} 公顷`;
 });
+
+function administrativePath(feature) {
+  const { level, code, parentCode } = feature._region;
+  const digits = String(code || "").replace(/\D/g, "");
+  const provinceFor = (cityFeature) => regionData.value.provinces.find((item) =>
+    item._region.code === cityFeature?.properties?.province_code,
+  ) || regionData.value.provinces.find((item) =>
+    String(cityFeature?.properties?.province_code || "").startsWith(item._region.code.slice(0, 2)),
+  );
+  const cityFor = (countyFeature) => regionData.value.cities.find((item) =>
+    item._region.code === countyFeature?.properties?.city_code,
+  );
+  if (level === "county") {
+    const cityFeature = cityFor(feature);
+    return { province: provinceFor(cityFeature), city: cityFeature, county: feature };
+  }
+  if (level === "township") {
+    const countyFeature = regionData.value.counties.find((item) => item._region.code === digits.slice(0, 6));
+    const cityFeature = cityFor(countyFeature);
+    return { province: provinceFor(cityFeature), city: cityFeature, county: countyFeature, township: feature };
+  }
+  if (level === "village") {
+    const villageParent = String(parentCode || "").replace(/\D/g, "");
+    const countyFeature = regionData.value.counties.find((item) => item._region.code === villageParent.slice(0, 6));
+    const cityFeature = cityFor(countyFeature);
+    const townshipFeature = regionData.value.townships.find((item) => item._region.code.replace(/\D/g, "").startsWith(villageParent.slice(0, 9)))
+      || regionData.value.townships.find((item) => item._region.code.replace(/\D/g, "").startsWith(villageParent.slice(0, 6))
+        && displayName(item) === feature.properties?.XZXZQMC);
+    return { province: provinceFor(cityFeature), city: cityFeature, county: countyFeature, township: townshipFeature, village: feature };
+  }
+  return {};
+}
+
+function administrativePathName(path) {
+  return [path.province, path.city, path.county, path.township, path.village]
+    .filter(Boolean).map(displayName).join(" · ");
+}
+
+function chooseAdministrativeMatch(match) {
+  const path = match.path;
+  administrativeSearchOpen.value = false;
+  searchedVillage.value = path.village || null;
+  province.value = displayName(path.province);
+  city.value = displayName(path.city);
+  county.value = displayName(path.county);
+  township.value = path.township?._region.code || "";
+  village.value = path.village?._region.key || "";
+  administrativeSearchQuery.value = displayName(match.feature);
+  selectedScope.value = null;
+  confirmed.value = false;
+  notice.value = "搜索结果已回填，正在自动定位并加载对应边界和耕地图斑…";
+  mapRef.value?.clearAdministrativeBoundary();
+  mapRef.value?.clearPickedPoint();
+  mapRef.value?.setCultivatedPlotLayer(null);
+  mapRef.value?.setScopeMask(null);
+  mapRef.value?.setAdministrativeContext({
+    province: path.province, city: path.city, county: path.county, township: path.township, village: path.village,
+  });
+  void selectAdministrativeScope();
+}
+
+function searchAdministrative() {
+  if (administrativeSearchQuery.value.trim().length < 2) {
+    notice.value = "请输入至少两个字，再搜索区县、乡镇或村名。";
+    return;
+  }
+  administrativeSearchOpen.value = true;
+  if (administrativeMatches.value.length === 1) chooseAdministrativeMatch(administrativeMatches.value[0]);
+  else if (!administrativeMatches.value.length) notice.value = "没有找到匹配的行政区名称，请检查输入或尝试简称。";
+}
 
 function chooseMode(nextMode) {
   mode.value = nextMode;
@@ -92,6 +193,9 @@ onMounted(async () => {
 function updateCityOptions() {
   city.value = "";
   county.value = "";
+  township.value = "";
+  village.value = "";
+  searchedVillage.value = null;
   selectedScope.value = null;
   confirmed.value = false;
   mapRef.value?.clearAdministrativeBoundary();
@@ -103,6 +207,9 @@ function updateCityOptions() {
 
 function updateCountyOptions() {
   county.value = "";
+  township.value = "";
+  village.value = "";
+  searchedVillage.value = null;
   selectedScope.value = null;
   confirmed.value = false;
   mapRef.value?.clearAdministrativeBoundary();
@@ -112,32 +219,78 @@ function updateCountyOptions() {
   mapRef.value?.setAdministrativeContext({ province: selectedProvince.value, city: selectedCity.value });
 }
 
+function updateTownshipOptions() {
+  township.value = "";
+  village.value = "";
+  searchedVillage.value = null;
+  selectedScope.value = null;
+  confirmed.value = false;
+  mapRef.value?.clearAdministrativeBoundary();
+  mapRef.value?.setCultivatedPlotLayer(null);
+  mapRef.value?.setScopeMask(null);
+  mapRef.value?.setAdministrativeContext({ province: selectedProvince.value, city: selectedCity.value, county: selectedCounty.value });
+  if (selectedCounty.value) void selectAdministrativeScope();
+}
+
+function updateVillageOptions() {
+  village.value = "";
+  searchedVillage.value = null;
+  selectedScope.value = null;
+  confirmed.value = false;
+  mapRef.value?.clearAdministrativeBoundary();
+  mapRef.value?.setScopeMask(null);
+  mapRef.value?.setAdministrativeContext({ province: selectedProvince.value, city: selectedCity.value, county: selectedCounty.value, township: selectedTownship.value });
+  if (selectedTownship.value) void selectAdministrativeScope();
+}
+
+function updateVillageSelection() {
+  searchedVillage.value = null;
+  selectedScope.value = null;
+  confirmed.value = false;
+  mapRef.value?.clearAdministrativeBoundary();
+  mapRef.value?.setCultivatedPlotLayer(null);
+  mapRef.value?.setScopeMask(null);
+  mapRef.value?.setAdministrativeContext({
+    province: selectedProvince.value, city: selectedCity.value, county: selectedCounty.value,
+    township: selectedTownship.value,
+  });
+  if (selectedVillage.value) void selectAdministrativeScope();
+}
+
 async function selectAdministrativeScope() {
-  if (!selectedProvince.value || !selectedCity.value || !selectedCounty.value) {
-    notice.value = regionsError.value || "请选择省、市、县（区）后再确认范围。";
+  const targetRegion = selectedVillage.value || selectedTownship.value || selectedCounty.value || selectedCity.value || selectedProvince.value;
+  if (!targetRegion) {
+    notice.value = regionsError.value || "请至少选择一个行政区级别后再定位范围。";
     return;
   }
   scopeLoading.value = true;
+  notice.value = `正在定位${displayName(targetRegion)}并加载边界和耕地图斑…`;
   try {
-    const feature = await loadAdministrativeBoundary(selectedCounty.value);
+    const feature = await loadAdministrativeBoundary(targetRegion);
+    const zoomByLevel = { province: 8, city: 10, county: 12, township: 14, village: 16 };
     mapRef.value?.clearPickedPoint();
     mapRef.value?.setScopeMask(null);
-    mapRef.value?.showAdministrativeBoundary(feature);
-    mapRef.value?.setAdministrativeContext({ province: selectedProvince.value, city: selectedCity.value, county: selectedCounty.value });
+    mapRef.value?.showAdministrativeBoundary(feature, zoomByLevel[targetRegion._region.level]);
+    mapRef.value?.setAdministrativeContext({ province: selectedProvince.value, city: selectedCity.value, county: selectedCounty.value, township: selectedTownship.value, village: selectedVillage.value });
     selectedScope.value = {
       type: "administrative",
-      name: `${province.value} ${city.value} ${county.value}`,
+      name: [province.value, city.value, county.value, selectedTownship.value && displayName(selectedTownship.value), selectedVillage.value && displayName(selectedVillage.value)].filter(Boolean).join(" "),
       areaMu: null,
       source: "本地 GeoServer 行政区边界与耕地图斑",
     };
     confirmed.value = false;
-    const plotLayer = await findCultivatedPlotLayer(selectedCounty.value);
-    if (plotLayer) {
-      mapRef.value?.setCultivatedPlotLayer(plotLayer);
-      notice.value = `已定位到${county.value}，并加载耕地图斑图层（${selectedCounty.value._region.code}）。`;
+    if (selectedCounty.value) {
+      const plotLayer = await findCultivatedPlotLayer(selectedCounty.value);
+      if (plotLayer) {
+        mapRef.value?.setCultivatedPlotLayer(plotLayer, feature);
+        notice.value = `已定位到${displayName(targetRegion)}，耕地图斑已按所选边界裁切显示。`;
+      } else {
+        mapRef.value?.setCultivatedPlotLayer(null);
+        notice.value = `已显示${displayName(targetRegion)}边界，但 GeoServer 中没有找到${county.value}对应的耕地图斑图层。`;
+      }
     } else {
       mapRef.value?.setCultivatedPlotLayer(null);
-      notice.value = `已显示${county.value}区县边界，但 GeoServer 中没有找到以 ${selectedCounty.value._region.code} 开头的耕地图斑图层。`;
+      notice.value = `已定位并显示${displayName(targetRegion)}边界。`;
     }
   } catch (error) {
     notice.value = error.message;
@@ -225,7 +378,7 @@ async function onPolygonSelected(selection) {
     type: "polygon",
     name: "自定义地图范围",
     areaMu: selection.areaMu,
-    source: "地图圈选范围；按所属区县筛选耕地图斑",
+    source: "地图圈选范围；耕地图斑按圈选边界裁切显示",
     coordinates: selection.coordinates,
   };
   confirmed.value = false;
@@ -233,7 +386,7 @@ async function onPolygonSelected(selection) {
   mapRef.value?.setCultivatedPlotLayer(null);
   mapRef.value?.setScopeMask(null);
   scopeLoading.value = true;
-  notice.value = "正在识别所属区县并查询范围内的耕地图斑…";
+  notice.value = "正在识别所属区县并按圈选边界裁切耕地图斑…";
   try {
     const countyFeature = await findCountyForPolygon(selection.coordinates);
     const countyLayer = await findCultivatedPlotLayer(countyFeature);
@@ -241,15 +394,15 @@ async function onPolygonSelected(selection) {
       notice.value = `已确认圈选范围位于${countyFeature._region.name}，但没有找到编码 ${countyFeature._region.code} 对应的耕地图斑图层。`;
       return;
     }
-    const result = await loadCultivatedPlots(countyLayer, selection.coordinates);
-    mapRef.value?.setCultivatedPlotFeatures(result.features);
+    mapRef.value?.setCultivatedPlotLayer(countyLayer, {
+      type: "Feature",
+      dataProjection: "EPSG:4490",
+      geometry: { type: "Polygon", coordinates: [selection.coordinates] },
+      properties: {},
+    });
     mapRef.value?.setScopeMask(selection.coordinates);
     selectedScope.value = { ...selectedScope.value, countyName: countyFeature._region.name, countyCode: countyFeature._region.code };
-    if (!result.features.length) {
-      notice.value = `已识别为${countyFeature._region.name}（${countyFeature._region.code}），但圈选区域内没有查询到耕地图斑。`;
-    } else {
-      notice.value = `已识别为${countyFeature._region.name}（${countyFeature._region.code}），查询并显示 ${result.features.length}${result.truncated ? "+" : ""} 个与圈选范围相交的耕地图斑。`;
-    }
+    notice.value = `已识别为${countyFeature._region.name}（${countyFeature._region.code}），耕地图斑已按圈选边界裁切显示。`;
   } catch (error) {
     selectedScope.value = null;
     mapRef.value?.clearDrawing();
@@ -323,13 +476,23 @@ function confirmScope() {
 
           <section v-if="mode === 'administrative'" class="wrfx-selection-panel">
             <div class="wrfx-panel-title"><PhBuildings />按行政区选择 <small>逐级定位</small></div>
+            <label class="wrfx-field"><span>搜索区县、乡镇或村名</span><div class="wrfx-search-field"><PhMagnifyingGlass /><input v-model="administrativeSearchQuery" placeholder="输入名称，如：衡阳县、井头镇、龙桥村" @input="administrativeSearchOpen = true" @keydown.enter.prevent="searchAdministrative" /><button type="button" aria-label="搜索行政区" :disabled="regionsLoading || !!regionsError" @click="searchAdministrative"><PhArrowRight /></button></div></label>
+            <div v-if="administrativeSearchOpen && administrativeSearchQuery.trim().length >= 2 && administrativeMatches.length" class="wrfx-search-results">
+              <button v-for="match in administrativeMatches" :key="`${match.feature._region.level}:${match.feature._region.key}`" class="wrfx-search-result" @click="chooseAdministrativeMatch(match)">
+                <PhMapPin /><span><strong>{{ displayName(match.feature) }}</strong><small>{{ administrativePathName(match.path) || '无法匹配完整行政区路径' }}</small></span><PhArrowRight class="result-arrow" />
+              </button>
+            </div>
+            <p v-else-if="administrativeSearchOpen && administrativeSearchQuery.trim().length >= 2 && !administrativeMatches.length" class="wrfx-search-message">没有找到匹配名称，请检查输入或尝试简称。</p>
+            <p v-else-if="administrativeSearchQuery && administrativeSearchQuery.trim().length < 2" class="wrfx-field-note"><PhInfo /> 请输入至少两个字，可搜索区县、乡镇或村名。</p>
             <label class="wrfx-field"><span>省级区域</span><select v-model="province" :disabled="regionsLoading || !!regionsError" @change="updateCityOptions"><option value="">{{ regionsLoading ? '正在读取地图服务…' : '请选择省级区域' }}</option><option v-for="item in provinceOptions" :key="item._region.code || item._region.name" :value="displayName(item)">{{ displayName(item) }}</option></select></label>
             <label class="wrfx-field"><span>地市</span><select v-model="city" :disabled="!province || !!regionsError" @change="updateCountyOptions"><option value="">请选择地市</option><option v-for="item in cityOptions" :key="item._region.code || item._region.name" :value="displayName(item)">{{ displayName(item) }}</option></select></label>
-            <label class="wrfx-field"><span>县（区）</span><select v-model="county" :disabled="!city || !!regionsError"><option value="">{{ city ? '请选择县（区）' : '请先选择地市' }}</option><option v-for="item in countyOptions" :key="item._region.code || item._region.name" :value="displayName(item)">{{ displayName(item) }}</option></select></label>
-            <button class="wrfx-secondary-button" :disabled="regionsLoading || !!regionsError || scopeLoading" @click="selectAdministrativeScope"><PhCrosshair />{{ scopeLoading ? '正在加载区县与耕地图斑…' : '定位并查看边界' }}</button>
-            <p v-if="regionsLoading" class="wrfx-field-note"><PhInfo /> 正在从本地地图服务读取湖南省、市、区县图层。</p>
+            <label class="wrfx-field"><span>县（区）</span><select v-model="county" :disabled="!city || !!regionsError || scopeLoading" @change="updateTownshipOptions"><option value="">{{ city ? '请选择县（区）' : '请先选择地市' }}</option><option v-for="item in countyOptions" :key="item._region.code || item._region.name" :value="displayName(item)">{{ displayName(item) }}</option></select></label>
+            <label class="wrfx-field"><span>乡镇（街道）</span><select v-model="township" :disabled="!county || !!regionsError || scopeLoading" @change="updateVillageOptions"><option value="">{{ county ? '请选择乡镇（街道）' : '请先选择县（区）' }}</option><option v-for="item in townshipOptions" :key="item._region.code" :value="item._region.code">{{ displayName(item) }}</option></select></label>
+            <label class="wrfx-field"><span>村</span><select v-model="village" :disabled="(!township && !searchedVillage) || !!regionsError || scopeLoading" @change="updateVillageSelection"><option value="">{{ township ? '请选择村' : searchedVillage ? '搜索村名已回填' : '请先选择乡镇（街道）' }}</option><option v-for="item in villageOptions" :key="item._region.key" :value="item._region.key">{{ displayName(item) }}</option></select></label>
+            <p v-if="regionsLoading" class="wrfx-field-note"><PhInfo /> 正在从本地地图服务读取湖南省、市、区县、乡镇和村界图层。</p>
             <p v-else-if="regionsError" class="wrfx-field-note error"><PhInfo /> {{ regionsError }} 服务地址：{{ geoserverEndpoint() }}</p>
-            <p v-else class="wrfx-field-note"><PhInfo /> 行政区数据来自 GeoServer；选中区县后地图自动缩放并显示边界。</p>
+            <p v-else-if="scopeLoading" class="wrfx-field-note"><PhInfo /> 正在自动定位并加载对应边界和耕地图斑…</p>
+            <p v-else class="wrfx-field-note"><PhInfo /> 选择县、乡镇或村后会自动定位并加载对应边界及耕地图斑。</p>
           </section>
 
           <section v-else-if="mode === 'cooperative'" class="wrfx-selection-panel">
