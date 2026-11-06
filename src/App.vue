@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   PhPlant,
   PhMapPin,
@@ -22,6 +22,51 @@ import {
   PhCoins,
 } from "@phosphor-icons/vue";
 import RealMap from "./components/RealMap.vue";
+const workspaceRef = ref(null);
+const leftWidth = ref(Number(localStorage.getItem('jsyy-left-width')) || null);
+const workspaceWidth = ref(window.innerWidth - 28);
+const optimalLeftWidth = computed(() => Math.round(workspaceWidth.value * 0.36));
+const draggingSplit = ref(false);
+function boundLeftWidth(value) {
+  const available = workspaceRef.value?.clientWidth || workspaceWidth.value;
+  return Math.min(available - 430, Math.max(optimalLeftWidth.value * 0.5, value));
+}
+function updateWorkspaceWidth() {
+  const workspace = workspaceRef.value;
+  if (workspace) {
+    const style = getComputedStyle(workspace);
+    workspaceWidth.value = workspace.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  } else workspaceWidth.value = window.innerWidth - 28;
+  if (leftWidth.value != null) leftWidth.value = boundLeftWidth(leftWidth.value);
+}
+function moveSplit(event) {
+  if (draggingSplit.value && workspaceRef.value) leftWidth.value = boundLeftWidth(event.clientX - workspaceRef.value.getBoundingClientRect().left);
+}
+function stopSplit() {
+  if (!draggingSplit.value) return;
+  draggingSplit.value = false;
+  document.body.classList.remove('jsyy-resizing');
+  window.removeEventListener('pointermove', moveSplit);
+  window.removeEventListener('pointerup', stopSplit);
+  window.removeEventListener('pointercancel', stopSplit);
+  localStorage.setItem('jsyy-left-width', String(leftWidth.value));
+}
+function startSplit(event) {
+  event.preventDefault();
+  draggingSplit.value = true;
+  document.body.classList.add('jsyy-resizing');
+  window.addEventListener('pointermove', moveSplit);
+  window.addEventListener('pointerup', stopSplit);
+  window.addEventListener('pointercancel', stopSplit);
+}
+function splitKey(event) {
+  if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+  event.preventDefault();
+  leftWidth.value = boundLeftWidth((leftWidth.value || workspaceRef.value?.querySelector('.chat-panel')?.offsetWidth || 360) + (event.key === 'ArrowRight' ? 20 : -20));
+  localStorage.setItem('jsyy-left-width', String(leftWidth.value));
+}
+onMounted(() => { updateWorkspaceWidth(); window.addEventListener('resize', updateWorkspaceWidth); });
+onBeforeUnmount(() => { stopSplit(); window.removeEventListener('resize', updateWorkspaceWidth); });
 import SchemeCard from "./components/SchemeCard.vue";
 import ReportView from "./components/ReportView.vue";
 import {
@@ -704,9 +749,10 @@ onBeforeUnmount(() => {
         <PhPlus :size="16" />新的分析
       </button>
     </div>
-    <section class="workspace">
+    <section ref="workspaceRef" class="workspace" :style="{ '--jsyy-ideal-sidebar-width': `${optimalLeftWidth}px`, ...(leftWidth ? { '--jsyy-left-width': `${boundLeftWidth(leftWidth)}px` } : {}) }">
       <aside class="chat-panel">
         <header class="panel-header">
+          <div class="jsyy-header-inner">
           <div class="assistant-identity">
             <span class="assistant-avatar"
               ><PhPlant :size="22" weight="duotone"
@@ -717,6 +763,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <span class="online-dot" aria-label="助手可用"></span>
+          </div>
         </header>
         <div ref="scrollEl" class="chat-scroll">
           <section v-if="!point" class="welcome">
@@ -1107,6 +1154,7 @@ onBeforeUnmount(() => {
           <p class="composer-hint">{{ workflow === "confirm-area" ? "面积单位：亩（直接输入数字即可），发送后自动计算总成本" : workflow === "choosing" ? "请选择治理目标，系统将推荐措施并询问治理面积" : workflow === "complete" ? "实施方案已在右侧，可从这里继续提问" : "位置确认后自动分析 · 全部交互在左侧对话" }}</p>
         </section>
       </aside>
+      <div class="jsyy-divider" role="separator" aria-label="调整对话栏和地图宽度" aria-orientation="vertical" tabindex="0" @pointerdown="startSplit" @keydown="splitKey"><span></span></div>
       <section class="work-panel">
         <header class="work-panel-header">
           <nav aria-label="分析工作区">

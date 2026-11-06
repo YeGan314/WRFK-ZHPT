@@ -21,8 +21,9 @@ import { apply as applyTransform } from "ol/transform.js";
 import { register } from "ol/proj/proj4.js";
 import proj4 from "proj4";
 import { geoserverEndpoint } from "../geoServer.js";
+import { metricBin, summarizeMetric } from "../pollutionAnalysis.js";
 
-const props = defineProps({ drawing: Boolean, picking: Boolean });
+const props = defineProps({ drawing: Boolean, picking: Boolean, analysisPoints: { type: Array, default: () => [] }, analysisMetric: { type: String, default: "ntCd" }, analysisBoundaries: { type: Array, default: () => [] }, showAnalysis: Boolean });
 const emit = defineEmits(["polygon-selected", "point-picked"]);
 let map;
 let drawInteraction;
@@ -36,6 +37,8 @@ let villageBoundaryLayer;
 let scopeLayer;
 let pointSource;
 let pointLayer;
+let analysisSource;
+let analysisLayer;
 let maskSource;
 let maskLayer;
 let scopeMaskCoordinates = null;
@@ -203,8 +206,8 @@ function setCultivatedPlotLayer(layerName, clipBoundary = null) {
   });
   clipRenderedLayer(cultivatedPlotLayer, clipGeometries);
   const layers = map.getLayers();
-  layers.insertAt(Math.max(0, layers.getLength() - 1), cultivatedPlotLayer);
-  if (scopeMaskCoordinates) layers.insertAt(Math.max(0, layers.getLength() - 1), maskLayer);
+  layers.insertAt(Math.max(0, layers.getArray().indexOf(analysisLayer)), cultivatedPlotLayer);
+  if (scopeMaskCoordinates && !layers.getArray().includes(maskLayer)) layers.insertAt(Math.max(0, layers.getArray().indexOf(cultivatedPlotLayer)), maskLayer);
 }
 
 function setCultivatedPlotFeatures(features = []) {
@@ -224,8 +227,8 @@ function setCultivatedPlotFeatures(features = []) {
     }),
   });
   const layers = map.getLayers();
-  layers.insertAt(Math.max(0, layers.getLength() - 1), cultivatedPlotLayer);
-  if (scopeMaskCoordinates) layers.insertAt(Math.max(0, layers.getLength() - 1), maskLayer);
+  layers.insertAt(Math.max(0, layers.getArray().indexOf(analysisLayer)), cultivatedPlotLayer);
+  if (scopeMaskCoordinates && !layers.getArray().includes(maskLayer)) layers.insertAt(Math.max(0, layers.getArray().indexOf(cultivatedPlotLayer)), maskLayer);
 }
 
 function updateScopeMask() {
@@ -245,7 +248,7 @@ function setScopeMask(coordinates = null) {
   if (!coordinates || !coordinates.length) return;
   updateScopeMask();
   if (map && !map.getLayers().getArray().includes(maskLayer)) {
-    map.getLayers().insertAt(Math.max(0, map.getLayers().getLength() - 1), maskLayer);
+    map.getLayers().insertAt(Math.max(0, map.getLayers().getArray().indexOf(analysisLayer)), maskLayer);
   }
 }
 
@@ -273,7 +276,25 @@ function clearPickedPoint() {
   pointSource?.clear();
 }
 
+function updateAnalysisLayer() {
+  if (!analysisSource || !analysisLayer) return;
+  analysisSource.clear();
+  analysisLayer.setVisible(props.showAnalysis);
+  if (!props.showAnalysis) return;
+  const boundaries = props.analysisBoundaries.length ? props.analysisBoundaries : summarizeMetric(props.analysisPoints, props.analysisMetric).boundaries || [];
+  for (const point of props.analysisPoints) {
+    const longitude = Number(point.lon);
+    const latitude = Number(point.lat);
+    if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) continue;
+    const feature = new Feature(new Point([longitude, latitude]));
+    feature.set("bin", metricBin(point[props.analysisMetric], boundaries));
+    feature.set("code", point.samplingPointsCode);
+    analysisSource.addFeature(feature);
+  }
+}
+
 watch(() => props.drawing, (drawing) => drawing ? beginDraw() : stopDraw());
+watch(() => [props.analysisPoints, props.analysisMetric, props.analysisBoundaries, props.showAnalysis], updateAnalysisLayer);
 
 onMounted(() => {
   proj4.defs(
@@ -301,6 +322,17 @@ onMounted(() => {
       }),
     }),
   });
+  analysisSource = new VectorSource();
+  const analysisColors = ["#37e34e", "#f3e94c", "#ff982b", "#db34df"];
+  analysisLayer = new VectorLayer({
+    source: analysisSource,
+    visible: false,
+    style: feature => new Style({ image: new CircleStyle({
+      radius: 5.5,
+      fill: new Fill({ color: analysisColors[feature.get("bin")] || "#9fb2bd" }),
+      stroke: new Stroke({ color: "#052331", width: 1.2 }),
+    }) }),
+  });
   maskSource = new VectorSource();
   maskLayer = new VectorLayer({
     source: maskSource,
@@ -324,7 +356,7 @@ onMounted(() => {
   baseLayer = createImageryLayer();
   map = new Map({
     target: "wrfx-map-canvas",
-    layers: [baseLayer, provinceBoundaryLayer, cityBoundaryLayer, countyBoundaryLayer, townshipBoundaryLayer, villageBoundaryLayer, scopeLayer, pointLayer],
+    layers: [baseLayer, provinceBoundaryLayer, cityBoundaryLayer, countyBoundaryLayer, townshipBoundaryLayer, villageBoundaryLayer, scopeLayer, analysisLayer, pointLayer],
     view: new View({ projection, center: [112.8, 27.3], zoom: 8, minZoom: 3, maxZoom: 18 }),
     controls: [],
   });
@@ -336,6 +368,7 @@ onMounted(() => {
   map.on("moveend", updateScopeMask);
   resizeObserver = new ResizeObserver(() => map?.updateSize());
   resizeObserver.observe(document.querySelector(".wrfx-map-panel"));
+  updateAnalysisLayer();
 });
 
 onBeforeUnmount(() => {

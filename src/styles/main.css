@@ -4025,3 +4025,43 @@ body {
   clip-path: none;
   opacity: 0.32;
 }
+
+/* Adjustable divider between the conversation and map workspace. */
+.workspace { grid-template-columns: minmax(0, var(--jsyy-left-width, 36%)) 8px minmax(0, 1fr); gap: 2px; }
+.jsyy-divider { display: flex; align-items: center; justify-content: center; z-index: 5; cursor: col-resize; touch-action: none; outline: none; }
+.jsyy-divider span { width: 1px; height: 48px; background: #2a8a9a88; transition: .18s; }
+.jsyy-divider:hover span, .jsyy-divider:focus-visible span, .jsyy-resizing .jsyy-divider span { height: 72px; background: #27e1e9; box-shadow: 0 0 9px #00dbe688; }
+.jsyy-resizing, .jsyy-resizing * { cursor: col-resize !important; user-select: none !important; }
+.jsyy-resizing .work-panel { pointer-events: none; }
+
+/* A wider conversation pane adds space around its preferred reading width. */
+.chat-panel { container: jsyy-sidebar / inline-size; }
+.jsyy-header-inner,
+.chat-scroll > *,
+.composer-area > :not(.search-results) {
+  width: 100%;
+  max-width: calc(var(--jsyy-ideal-sidebar-width, 460px) - 46px);
+  margin-inline: auto;
+}
+.jsyy-header-inner { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
+.jsyy-header-inner .assistant-identity { min-width: 0; }
+.jsyy-header-inner .assistant-identity > div { min-width: 0; }
+.jsyy-header-inner h1,
+.jsyy-header-inner p { overflow-wrap: anywhere; }
+.composer-area > .search-results {
+  left: 50%;
+  right: auto;
+  width: calc(100% - 36px);
+  max-width: calc(var(--jsyy-ideal-sidebar-width, 460px) - 46px);
+  transform: translateX(-50%);
+}
+@container jsyy-sidebar (max-width: 320px) {
+  .panel-header { padding-inline: 9px; }
+  .chat-scroll { padding-inline: 9px; }
+  .composer-area { padding-inline: 9px; }
+  .assistant-avatar { width: 30px; height: 30px; flex: 0 0 30px; }
+  .panel-header h1 { font-size: 12px; }
+  .panel-header p { font-size: 9px; }
+  .welcome h2 { font-size: 23px; }
+  .metric-grid { grid-template-columns: 1fr; }
+}

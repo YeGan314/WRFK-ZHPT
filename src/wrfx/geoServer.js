@@ -125,6 +125,25 @@ export async function loadCultivatedPlots(layerName, ring) {
   return { features: data.features.filter((feature) => feature.geometry), truncated: data.features.length >= 10000 };
 }
 
+/** Find every county touched by a small point buffer, including border cases. */
+export async function findCountiesIntersectingRing(ring) {
+  const closed = ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1]
+    ? ring : [...ring, ring[0]];
+  const points = closed.map(([longitude, latitude]) => `${latitude} ${longitude}`).join(",");
+  const params = new URLSearchParams({
+    service: "WFS", version: "1.1.0", request: "GetFeature",
+    typeName: DEFAULT_LAYERS.county, outputFormat: "application/json", srsName: "EPSG:4326",
+    maxFeatures: "20", propertyName: LAYER_FIELDS.county,
+    CQL_FILTER: `INTERSECTS(geom,POLYGON((${points})))`,
+  });
+  const response = await fetch(`${baseUrl}/ows?${params}`);
+  if (!response.ok) throw new Error(`点位所属区县查询失败（HTTP ${response.status}）。`);
+  const data = await response.json();
+  if (!Array.isArray(data.features)) throw new Error("GeoServer 未返回区县查询结果。");
+  return data.features.map((feature) => normalizeFeature(feature, "county"))
+    .filter((feature) => /^\d{6}$/.test(feature._region.code));
+}
+
 /** Fetch cultivated plots intersecting a selected township or village boundary. */
 export async function loadCultivatedPlotsInBoundary(layerName, boundary) {
   if (!layerName || !boundary) throw new Error("行政区边界或耕地图斑图层无效，请重新选择区域。");

@@ -284,6 +284,63 @@ function pointAnalysisProxyPlugin(env, base) {
   return {
     name: "point-analysis-proxy",
     configureServer(server) {
+      server.middlewares.use("/wrfx/api/pollution/summary", async (req, res) => {
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (req.method !== "GET") {
+          res.statusCode = 405;
+          res.end(JSON.stringify({ message: "Method Not Allowed" }));
+          return;
+        }
+        try {
+          const url = new URL(req.url || "", "http://localhost");
+          const zoneCode = url.searchParams.get("zoneCode") || "";
+          const dataYear = url.searchParams.get("dataYear") || "";
+          if (!/^ZONE\d{10}$/.test(zoneCode) || !/^\d{4}$/.test(dataYear)) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ message: "示范区编码或年份无效。" }));
+            return;
+          }
+          const tasks = [
+            ["causeSum", "/cphmp/zone/getCauseSum", { zoneCode, dataYear }],
+            ...[
+              ["soilCd", "10", "Cd"], ["soilAs", "10", "As"],
+              ["riceCd", "9", "Cd"], ["riceAs", "9", "As"],
+              ["soilPh", "11", "pH"], ["soilSom", "11", "SOM"],
+            ].map(([key, categoryCode, factorsCode]) => [key, "/cphmp/sample-sum/factorsRange", { zoneCode, dataYear, categoryCode, factorsCode }]),
+          ];
+          const settled = await Promise.allSettled(tasks.map(([, path, params]) => client.request(path, { params })));
+          const results = Object.fromEntries(tasks.map(([key], index) => [key, settled[index].status === "fulfilled" ? settled[index].value.data : null]));
+          res.end(JSON.stringify({ data: results }));
+        } catch (error) {
+          res.statusCode = 502;
+          res.end(JSON.stringify({ message: error.message || "污染现状汇总接口读取失败。" }));
+        }
+      });
+      server.middlewares.use("/wrfx/api/data-check/points", async (req, res) => {
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (req.method !== "GET") {
+          res.statusCode = 405;
+          res.end(JSON.stringify({ message: "Method Not Allowed" }));
+          return;
+        }
+        try {
+          const url = new URL(req.url || "", "http://localhost");
+          const zoneCode = url.searchParams.get("zoneCode") || "";
+          const surveyYear = url.searchParams.get("surveyYear") || "";
+          if (!/^ZONE\d{10}$/.test(zoneCode) || !/^\d{4}$/.test(surveyYear)) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ message: "示范区编码或调查年度无效。" }));
+            return;
+          }
+          const result = await client.request("/risk/risk-front-table/list", {
+            params: { zoneCode, surveyYear, categoryCode: "16", factorsCode: "Cd" },
+          });
+          res.end(JSON.stringify({ data: Array.isArray(result.data) ? result.data : [] }));
+        } catch (error) {
+          res.statusCode = 502;
+          res.end(JSON.stringify({ message: error.message || "原系统点位数据获取失败。" }));
+        }
+      });
       server.middlewares.use(
         `${base}api/point-analysis/point-data`,
         async (req, res) => {
