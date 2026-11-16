@@ -1,9 +1,10 @@
+const workspace = import.meta.env.VITE_GEOSERVER_WORKSPACE || "HNS_NHS";
 const DEFAULT_LAYERS = {
-  province: "HNS_NHS:hunan_province",
-  city: "HNS_NHS:hunan_prefecture",
-  county: "HNS_NHS:hunan_county",
-  township: "HNS_NHS:hunan_township",
-  village: "HNS_NHS:hunan_village",
+  province: `${workspace}:hunan_province`,
+  city: `${workspace}:hunan_prefecture`,
+  county: `${workspace}:hunan_county`,
+  township: `${workspace}:hunan_township`,
+  village: `${workspace}:hunan_village`,
 };
 const LAYER_FIELDS = {
   province: "province_code,province_name",
@@ -12,6 +13,9 @@ const LAYER_FIELDS = {
   township: "乡镇级,乡镇码",
   village: "CJDCQDM,CJDCQMC,XZXZQDM,XZXZQMC",
 };
+// The cultivated plot tables in both PostgreSQL environments publish their
+// spatial column as `wkb_geometry`; they do not have a `geom` property.
+const CULTIVATED_GEOMETRY_FIELD = "wkb_geometry";
 
 const baseUrl = (import.meta.env.VITE_GEOSERVER_URL || "/wrfx/geoserver").replace(/\/$/, "");
 const cultivatedLayerCache = new Map();
@@ -91,7 +95,7 @@ export async function findCultivatedPlotLayer(region) {
   if (!/^\d{6}$/.test(code || "")) throw new Error("所选区县没有有效的 6 位行政区编码。");
   if (cultivatedLayerCache.has(code)) return cultivatedLayerCache.get(code);
   const params = new URLSearchParams({ service: "WMS", version: "1.1.0", request: "GetCapabilities" });
-  const response = await fetch(`${baseUrl}/HNS_NHS/wms?${params}`);
+  const response = await fetch(`${baseUrl}/${workspace}/wms?${params}`);
   if (!response.ok) throw new Error(`耕地图斑图层目录读取失败（HTTP ${response.status}）`);
   const xml = new DOMParser().parseFromString(await response.text(), "text/xml");
   if (xml.querySelector("parsererror")) throw new Error("GeoServer 返回的 WMS 图层目录无法解析。");
@@ -116,7 +120,7 @@ export async function loadCultivatedPlots(layerName, ring) {
     service: "WFS", version: "1.1.0", request: "GetFeature",
     typeName: layerName, outputFormat: "application/json", srsName: "EPSG:4326",
     maxFeatures: "10000",
-    CQL_FILTER: `INTERSECTS(wkb_geometry,POLYGON((${points})))`,
+    CQL_FILTER: `INTERSECTS(${CULTIVATED_GEOMETRY_FIELD},POLYGON((${points})))`,
   });
   const response = await fetch(`${baseUrl}/ows?${params}`);
   if (!response.ok) throw new Error(`耕地图斑查询失败（HTTP ${response.status}）。`);
@@ -163,7 +167,7 @@ export async function loadCultivatedPlotsInBoundary(layerName, boundary) {
     service: "WFS", version: "1.1.0", request: "GetFeature",
     typeName: layerName, outputFormat: "application/json", srsName: "EPSG:4326",
     maxFeatures: "10000",
-    CQL_FILTER: `INTERSECTS(wkb_geometry,${spatialWkt})`,
+    CQL_FILTER: `INTERSECTS(${CULTIVATED_GEOMETRY_FIELD},${spatialWkt})`,
   });
   const response = await fetch(`${baseUrl}/ows`, {
     method: "POST",
@@ -210,12 +214,17 @@ export async function findCountyForPolygon(ring) {
 
 export async function loadAdministrativeRegions() {
   try {
-    const [provinces, cities, counties, townships, villages] = await Promise.all([
-      fetchLayer("province"), fetchLayer("city"), fetchLayer("county"), fetchLayer("township"), fetchLayer("village"),
+    const [provinces, cities, counties] = await Promise.all([
+      fetchLayer("province"), fetchLayer("city"), fetchLayer("county"),
     ]);
-    if (!provinces.length || !cities.length || !counties.length || !townships.length || !villages.length) {
-      throw new Error("地图服务的行政区图层为空，请检查 GeoServer 中的省、市、县、乡镇和村界图层发布状态。");
+    const [townshipResult, villageResult] = await Promise.allSettled([
+      fetchLayer("township"), fetchLayer("village"),
+    ]);
+    if (!provinces.length || !cities.length || !counties.length) {
+      throw new Error("地图服务的行政区图层为空，请检查 GeoServer 中的省、市、县图层发布状态。");
     }
+    const townships = townshipResult.status === "fulfilled" ? townshipResult.value : [];
+    const villages = villageResult.status === "fulfilled" ? villageResult.value : [];
     const uniqueVillages = new Map();
     for (const village of villages) {
       if (!uniqueVillages.has(village._region.key)) uniqueVillages.set(village._region.key, village);
@@ -223,7 +232,7 @@ export async function loadAdministrativeRegions() {
     return { provinces, cities, counties, townships, villages: [...uniqueVillages.values()] };
   } catch (error) {
     const hint = error instanceof TypeError
-      ? "无法连接地图服务。请确认本机 GeoServer 已启动，并已发布省、市、县、乡镇和村界图层。"
+      ? "无法连接地图服务。请确认 GeoServer 已启动，并已发布省、市、县图层。"
       : error.message;
     throw new Error(hint);
   }
@@ -263,4 +272,8 @@ export function displayName(feature) {
 
 export function geoserverEndpoint() {
   return baseUrl;
+}
+
+export function geoserverWorkspace() {
+  return workspace;
 }

@@ -87,6 +87,7 @@ import {
 
 const point = ref(null),
   pointData = ref(null),
+  metricOverrides = ref({}),
   risk = ref(null),
   plans = ref([]),
   report = ref(null);
@@ -157,6 +158,15 @@ const orderedPlans = computed(() =>
   ),
 );
 const metrics = computed(() => pointData.value?.metrics || {});
+const analysisMetrics = computed(() => ({ ...metrics.value, ...metricOverrides.value }));
+const latestMetricFields = [
+  { key: "riceCd", label: "稻米镉", unit: "mg/kg" },
+  { key: "riceAs", label: "稻米砷", unit: "mg/kg" },
+  { key: "soilCd", label: "土壤镉", unit: "mg/kg" },
+  { key: "soilAs", label: "土壤砷", unit: "mg/kg" },
+  { key: "ph", label: "pH", unit: "" },
+];
+const latestMetricDraft = ref({ riceCd: "", riceAs: "", soilCd: "", soilAs: "", ph: "" });
 const fluxGroups = computed(() => buildFlux(pointData.value?.flux || {}));
 watch(
   () => messages.value.length,
@@ -229,8 +239,18 @@ function scrollBottom() {
     }),
   );
 }
+function createId() {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((value) => value.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 function addMessage(role, content) {
-  messages.value.push({ id: crypto.randomUUID(), role, content });
+  messages.value.push({ id: createId(), role, content });
   scrollBottom();
 }
 function focusInput() {
@@ -259,6 +279,7 @@ function reset() {
   controller = new AbortController();
   point.value = null;
   pointData.value = null;
+  metricOverrides.value = {};
   risk.value = null;
   plans.value = [];
   report.value = null;
@@ -360,6 +381,7 @@ function modelInput() {
     lon: point.value.longitude,
     lat: point.value.latitude,
     ...metrics.value,
+    ...analysisMetrics.value,
     fluxData: pointData.value?.flux || {},
   };
 }
@@ -377,7 +399,7 @@ async function runRoute(route, runId = revision) {
     const normalized = normalizeScheme(
       route,
       result.data,
-      result.analysisInput || metrics.value,
+      result.analysisInput || analysisMetrics.value,
       risk.value,
     );
     plans.value = plans.value.map((p) => (p.id === route.id ? normalized : p));
@@ -404,6 +426,8 @@ async function selectPoint(selected) {
   preferenceMessage.value = "";
   workflowMessage.value = "";
   pointData.value = null;
+  metricOverrides.value = {};
+  latestMetricDraft.value = { riceCd: "", riceAs: "", soilCd: "", soilAs: "", ph: "" };
   risk.value = null;
   plans.value = [];
   report.value = null;
@@ -419,9 +443,9 @@ async function selectPoint(selected) {
   searchNotice.value = "";
   preference.value = "balanced";
   noVariety.value = false;
-  workflow.value = "choosing";
+  workflow.value = "idle";
   preferenceMessage.value = "";
-  workflowMessage.value = "点位分析和治理措施对比已完成。请选择本次治理最看重的目标；我会根据选择推荐措施、说明投入和农事安排，并询问治理面积。";
+  workflowMessage.value = "";
   addMessage("user", `帮我分析这个位置：${point.value.name}`);
   try {
     const response = await api(appPath("api/point-analysis/point-data"), {
@@ -455,6 +479,37 @@ async function selectPoint(selected) {
       throw new Error(
         `当前缺少${missing.map((k) => metricDefs.find((d) => d[0] === k)?.[1] || k).join("、")}，暂不能计算治理方案。可以换个位置或补充平台数据。`,
       );
+    step.value = "idle";
+    workflow.value = "confirm-rice-cd";
+    workflowMessage.value = "请核对当前调查值。只填写有最新检测结果的项目，留空的项目会沿用当前值；填完后提交一次即可开始分析。";
+  } catch (e) {
+    if (runId !== revision || e.name === "AbortError") return;
+    error.value = e.message;
+    step.value = "error";
+  }
+}
+async function startGovernanceAnalysis() {
+  if (workflow.value !== "confirm-rice-cd" || busy.value) return;
+  const overrides = {};
+  for (const field of latestMetricFields) {
+    const raw = String(latestMetricDraft.value[field.key] ?? "").trim();
+    if (!raw) continue;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0 || (field.key === "ph" && value > 14)) {
+      workflowMessage.value = field.key === "ph"
+        ? "pH 请填写 0–14 之间的数值；其他指标须为大于或等于 0 的数值。请检查后再提交。"
+        : "检测值须为大于或等于 0 的有效数值，请检查后再提交。";
+      return;
+    }
+    overrides[field.key] = value;
+  }
+  metricOverrides.value = overrides;
+  const runId = revision;
+  const updatedCount = Object.keys(overrides).length;
+  workflowMessage.value = updatedCount
+    ? `已采用您填写的 ${updatedCount} 项最新检测值，空白项沿用当前调查值，开始分析。`
+    : "未填写最新检测值，将全部沿用当前调查值，开始分析。";
+  try {
     step.value = "risk";
     const result = await api(appPath("api/assistant/risk"), modelInput());
     if (runId !== revision) return;
@@ -462,8 +517,6 @@ async function selectPoint(selected) {
     plans.value = routes.map((r) => ({ ...r, status: "queued" }));
     step.value = "plans";
     view.value = "compare";
-    // The backend is sensitive to concurrent workflow requests. Await each
-    // route before starting the next one, then compare the complete set.
     for (const route of routes) {
       if (runId !== revision) return;
       await runRoute(route, runId);
@@ -498,7 +551,7 @@ function createReport(plan, area) {
   } else {
     report.value = JSON.parse(
       JSON.stringify({
-        id: crypto.randomUUID(),
+        id: createId(),
         point: point.value,
         metrics: metrics.value,
         risk: risk.value,
@@ -598,6 +651,11 @@ async function send() {
   if (!point.value) {
     inputMode.value = "location";
     return searchLocation(content);
+  }
+  if (workflow.value === "confirm-rice-cd") {
+    workflowMessage.value = "请在上方对应指标的最新检测值栏填写数据，再点一次“按以上数值开始分析”。";
+    input.value = "";
+    return;
   }
   input.value = "";
   if (workflow.value === "confirm-area") {
@@ -1025,10 +1083,20 @@ onBeforeUnmount(() => {
                 / {{ routes.length }}）
               </button>
             </section>
-            <div v-if="workflowMessage && workflow !== 'confirm-area' && workflow !== 'complete'" class="message assistant">
+            <div v-if="workflowMessage && !['confirm-area', 'complete'].includes(workflow)" class="message assistant">
               <span class="message-avatar"><PhPlant :size="18" /></span>
               <div class="workflow-message-content">
                 <p>{{ workflowMessage }}</p>
+                <div v-if="workflow === 'confirm-rice-cd'" class="latest-metrics-form">
+                  <div class="latest-metrics-row latest-metrics-heading"><span>指标</span><span>当前值</span><span>最新检测值</span></div>
+                  <label v-for="field in latestMetricFields" :key="field.key" class="latest-metrics-row">
+                    <span class="latest-metric-name">{{ field.label }} <small v-if="field.unit">{{ field.unit }}</small></span>
+                    <span class="latest-metric-current">{{ format(metrics[field.key]) }}<small v-if="field.unit"> {{ field.unit }}</small></span>
+                    <input v-model="latestMetricDraft[field.key]" type="number" min="0" :max="field.key === 'ph' ? 14 : undefined" step="any" :aria-label="`${field.label}最新检测值${field.unit ? `（${field.unit}）` : ''}`" :placeholder="field.key === 'ph' ? '0–14' : '可留空'" :disabled="busy" />
+                  </label>
+                  <p class="latest-metrics-hint">只填写有新结果的项目，留空沿用当前值；pH 范围为 0–14。</p>
+                  <button type="button" class="latest-metrics-submit" :disabled="busy" @click="startGovernanceAnalysis">按以上数值开始分析</button>
+                </div>
                 <div v-if="workflow === 'choosing'" class="chat-preferences">
                   <button v-for="pref in preferences" :key="pref.id" type="button" :class="{ active: preference === pref.id }" @click="choosePreference(pref.id)">{{ pref.label }}</button>
                   <button type="button" :class="{ active: noVariety }" @click="toggleNoVariety">不更换品种</button>
@@ -1151,7 +1219,7 @@ onBeforeUnmount(() => {
               </button>
             </div>
           </form>
-          <p class="composer-hint">{{ workflow === "confirm-area" ? "面积单位：亩（直接输入数字即可），发送后自动计算总成本" : workflow === "choosing" ? "请选择治理目标，系统将推荐措施并询问治理面积" : workflow === "complete" ? "实施方案已在右侧，可从这里继续提问" : "位置确认后自动分析 · 全部交互在左侧对话" }}</p>
+          <p class="composer-hint">{{ workflow === "confirm-area" ? "面积单位：亩（直接输入数字即可），发送后自动计算总成本" : workflow === "confirm-rice-cd" ? "可在上方一次填写多项最新检测值" : workflow === "choosing" ? "请选择治理目标，系统将推荐措施并询问治理面积" : workflow === "complete" ? "实施方案已在右侧，可从这里继续提问" : "位置确认后自动分析 · 全部交互在左侧对话" }}</p>
         </section>
       </aside>
       <div class="jsyy-divider" role="separator" aria-label="调整对话栏和地图宽度" aria-orientation="vertical" tabindex="0" @pointerdown="startSplit" @keydown="splitKey"><span></span></div>

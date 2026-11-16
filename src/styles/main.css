@@ -11,6 +11,59 @@
   --line: #e2e9ec;
   --navy: #102d46;
 }
+
+.latest-metrics-form {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid #1b6472;
+  background: #071d29;
+}
+.latest-metrics-row {
+  display: grid;
+  grid-template-columns: minmax(62px, 0.9fr) minmax(80px, 1fr) minmax(95px, 1.15fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 11px;
+}
+.latest-metrics-heading {
+  padding-bottom: 5px;
+  border-bottom: 1px solid #17404d;
+  color: #83aeb8;
+  font-size: 10px;
+}
+.latest-metric-name { color: #d1eaec; }
+.latest-metric-name small,
+.latest-metric-current small { color: #82aab2; font-size: 9px; }
+.latest-metric-current { color: #f1c84c; font-variant-numeric: tabular-nums; }
+.latest-metrics-row input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 4px 7px;
+  border: 1px solid #245463;
+  border-radius: 2px;
+  background: #0b2835;
+  color: #e2f7f7;
+  font: inherit;
+}
+.latest-metrics-row input:focus { outline: 1px solid #25d4dc; border-color: #25d4dc; }
+.latest-metrics-row input::placeholder { color: #64848d; }
+.latest-metrics-hint { margin: 3px 0; color: #91b1b8; font-size: 10px; line-height: 1.5; }
+.latest-metrics-submit {
+  min-height: 34px;
+  border: 1px solid #13b9c6;
+  background: #0d5664;
+  color: #e5feff;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+.latest-metrics-submit:hover { background: #117184; }
+.latest-metrics-submit:disabled { cursor: wait; opacity: .55; }
 * {
   box-sizing: border-box;
 }
@@ -4064,4 +4117,74 @@ body {
   .panel-header p { font-size: 9px; }
   .welcome h2 { font-size: 23px; }
   .metric-grid { grid-template-columns: 1fr; }
+}
+
+/* 打印报告使用独立的浅色配色，避免深色屏幕样式在白纸上变成浅色文字。 */
+@media print {
+  html, body, #app {
+    background: #fff !important;
+  }
+  .jsyy-divider,
+  .work-panel::before,
+  .work-panel::after {
+    display: none !important;
+  }
+  .report-view,
+  .report-paper {
+    background: #fff !important;
+    color: #24343a !important;
+    overflow: visible !important;
+    height: auto !important;
+    box-shadow: none !important;
+  }
+  .report-paper {
+    width: auto !important;
+    max-width: none !important;
+    border: 0 !important;
+  }
+  .report-paper * {
+    opacity: 1 !important;
+    text-shadow: none !important;
+  }
+  .report-paper h1,
+  .report-paper h2,
+  .report-paper h3,
+  .report-paper b,
+  .report-paper strong,
+  .report-paper dd {
+    color: #173842 !important;
+  }
+  .report-paper p,
+  .report-paper span,
+  .report-paper dt,
+  .report-paper li,
+  .report-paper label,
+  .report-paper small,
+  .report-paper footer,
+  .report-paper input,
+  .report-paper textarea {
+    color: #344d55 !important;
+    -webkit-text-fill-color: #344d55 !important;
+  }
+  .report-highlight,
+  .area-estimate,
+  .implementation-step > span {
+    background: #eef5f4 !important;
+  }
+  .report-paper textarea,
+  .area-estimate input {
+    background: #fff !important;
+  }
+  .report-section-title,
+  .report-eyebrow,
+  .report-note,
+  .report-footer {
+    break-inside: avoid;
+  }
+  .implementation-step,
+  .report-facts > div,
+  .area-estimate,
+  .monitoring-list li {
+    break-inside: avoid;
+  }
 }

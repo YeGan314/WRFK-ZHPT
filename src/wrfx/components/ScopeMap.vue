@@ -20,7 +20,7 @@ import { get as getProjection } from "ol/proj.js";
 import { apply as applyTransform } from "ol/transform.js";
 import { register } from "ol/proj/proj4.js";
 import proj4 from "proj4";
-import { geoserverEndpoint } from "../geoServer.js";
+import { geoserverEndpoint, geoserverWorkspace } from "../geoServer.js";
 import { metricBin, summarizeMetric } from "../pollutionAnalysis.js";
 
 const props = defineProps({ drawing: Boolean, picking: Boolean, analysisPoints: { type: Array, default: () => [] }, analysisMetric: { type: String, default: "ntCd" }, analysisBoundaries: { type: Array, default: () => [] }, showAnalysis: Boolean });
@@ -198,7 +198,7 @@ function setCultivatedPlotLayer(layerName, clipBoundary = null) {
   cultivatedPlotLayer = new TileLayer({
     opacity: 0.92,
     source: new TileWMS({
-      url: `${geoserverEndpoint()}/HNS_NHS/wms`,
+      url: `${geoserverEndpoint()}/${geoserverWorkspace()}/wms`,
       params: { LAYERS: layerName, STYLES: "", FORMAT: "image/png", TRANSPARENT: true, VERSION: "1.1.0" },
       serverType: "geoserver",
       transition: 0,
@@ -342,8 +342,8 @@ onMounted(() => {
     opacity,
     visible,
     source: new TileWMS({
-      url: `${geoserverEndpoint()}/HNS_NHS/wms`,
-      params: { LAYERS: `HNS_NHS:hunan_${layer}`, STYLES: "", FORMAT: "image/png", TRANSPARENT: true, VERSION: "1.1.0" },
+      url: `${geoserverEndpoint()}/${geoserverWorkspace()}/wms`,
+      params: { LAYERS: `${geoserverWorkspace()}:hunan_${layer}`, STYLES: "", FORMAT: "image/png", TRANSPARENT: true, VERSION: "1.1.0" },
       serverType: "geoserver",
       transition: 0,
     }),
