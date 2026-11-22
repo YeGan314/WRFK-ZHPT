@@ -23,7 +23,7 @@ import proj4 from "proj4";
 import { geoserverEndpoint, geoserverWorkspace } from "../geoServer.js";
 import { metricBin, summarizeMetric } from "../pollutionAnalysis.js";
 
-const props = defineProps({ drawing: Boolean, picking: Boolean, analysisPoints: { type: Array, default: () => [] }, analysisMetric: { type: String, default: "ntCd" }, analysisBoundaries: { type: Array, default: () => [] }, showAnalysis: Boolean });
+const props = defineProps({ drawing: Boolean, picking: Boolean, analysisPoints: { type: Array, default: () => [] }, analysisMetric: { type: String, default: "ntCd" }, analysisBoundaries: { type: Array, default: () => [] }, showAnalysis: Boolean, riskFeatures: { type: Array, default: () => [] }, riskBoundary: { type: [Object, Array], default: null }, showRisk: Boolean });
 const emit = defineEmits(["polygon-selected", "point-picked"]);
 let map;
 let drawInteraction;
@@ -39,6 +39,9 @@ let pointSource;
 let pointLayer;
 let analysisSource;
 let analysisLayer;
+let riskSource;
+let riskLayer;
+let riskClipGeometries = [];
 let maskSource;
 let maskLayer;
 let scopeMaskCoordinates = null;
@@ -168,13 +171,18 @@ function polygonRings(geometry) {
 }
 
 function clipRenderedLayer(layer, geometries) {
-  if (!geometries.length) return;
+  const readGeometries = typeof geometries === 'function' ? geometries : () => geometries;
+  let clipped = false;
   layer.on("prerender", (event) => {
+    clipped = false;
+    const clipGeometries = readGeometries();
+    if (!clipGeometries.length) return;
     const context = event.context;
     if (!context?.beginPath || !context?.clip) return;
     context.save();
+    clipped = true;
     context.beginPath();
-    for (const geometry of geometries) {
+    for (const geometry of clipGeometries) {
       for (const ring of polygonRings(geometry)) {
         ring.forEach((coordinate, index) => {
           const mapPixel = map.getPixelFromCoordinate(coordinate);
@@ -188,7 +196,7 @@ function clipRenderedLayer(layer, geometries) {
     }
     context.clip("evenodd");
   });
-  layer.on("postrender", (event) => event.context?.restore?.());
+  layer.on("postrender", (event) => { if (clipped) event.context?.restore?.(); clipped = false; });
 }
 
 function setCultivatedPlotLayer(layerName, clipBoundary = null) {
@@ -293,8 +301,21 @@ function updateAnalysisLayer() {
   }
 }
 
+function updateRiskLayer() {
+  if (!riskSource || !riskLayer) return;
+  riskClipGeometries = readClipGeometries(props.riskBoundary);
+  riskSource.clear();
+  riskLayer.setVisible(props.showRisk);
+  if (cultivatedPlotLayer) cultivatedPlotLayer.setVisible(!props.showRisk);
+  if (!props.showRisk || !props.riskFeatures.length) return;
+  riskSource.addFeatures(new GeoJSON().readFeatures({ type: 'FeatureCollection', features: props.riskFeatures }, {
+    dataProjection: 'EPSG:4326', featureProjection: projection,
+  }));
+}
+
 watch(() => props.drawing, (drawing) => drawing ? beginDraw() : stopDraw());
 watch(() => [props.analysisPoints, props.analysisMetric, props.analysisBoundaries, props.showAnalysis], updateAnalysisLayer);
+watch(() => [props.riskFeatures, props.riskBoundary, props.showRisk], updateRiskLayer);
 
 onMounted(() => {
   proj4.defs(
@@ -333,6 +354,17 @@ onMounted(() => {
       stroke: new Stroke({ color: "#052331", width: 1.2 }),
     }) }),
   });
+  riskSource = new VectorSource();
+  const riskColors = ['#30d861', '#e1db43', '#f3a43c', '#ef6254', '#bd52c8'];
+  riskLayer = new VectorLayer({
+    source: riskSource,
+    visible: false,
+    style: feature => new Style({
+      fill: new Fill({ color: `${riskColors[feature.get('riskLevel')] || '#8694a0'}bc` }),
+      stroke: new Stroke({ color: '#9ceeee', width: 1 }),
+    }),
+  });
+  clipRenderedLayer(riskLayer, () => riskClipGeometries);
   maskSource = new VectorSource();
   maskLayer = new VectorLayer({
     source: maskSource,
@@ -356,7 +388,7 @@ onMounted(() => {
   baseLayer = createImageryLayer();
   map = new Map({
     target: "wrfx-map-canvas",
-    layers: [baseLayer, provinceBoundaryLayer, cityBoundaryLayer, countyBoundaryLayer, townshipBoundaryLayer, villageBoundaryLayer, scopeLayer, analysisLayer, pointLayer],
+    layers: [baseLayer, provinceBoundaryLayer, cityBoundaryLayer, countyBoundaryLayer, townshipBoundaryLayer, villageBoundaryLayer, scopeLayer, riskLayer, analysisLayer, pointLayer],
     view: new View({ projection, center: [112.8, 27.3], zoom: 8, minZoom: 3, maxZoom: 18 }),
     controls: [],
   });
@@ -369,6 +401,7 @@ onMounted(() => {
   resizeObserver = new ResizeObserver(() => map?.updateSize());
   resizeObserver.observe(document.querySelector(".wrfx-map-panel"));
   updateAnalysisLayer();
+  updateRiskLayer();
 });
 
 onBeforeUnmount(() => {

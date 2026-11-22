@@ -29,6 +29,8 @@ import { displayName, filterByParent, findCountyForPolygon, findCountiesIntersec
 import { normalizeLocations } from "../lib/analysis.js";
 import { comparePoints, readSupplementPoints } from "./pointComparison.js";
 import { pointsInsideBoundary, pollutionMetrics, summarizeMetric, withSupplementPoints } from "./pollutionAnalysis.js";
+import { causeReport } from "./causeAnalysis.js";
+import { riskGeoFeatures, riskProfile } from "./riskAnalysis.js";
 import { saveSurveySnapshot as persistSurveySnapshot } from "./surveyCache.js";
 
 const mode = ref("administrative");
@@ -87,12 +89,86 @@ const analysisMetric = ref('ntCd');
 const analysisLoading = ref(false);
 const analysisError = ref('');
 const remoteSummaries = ref(null);
+const riskSummaries = ref(null);
+const riskLoading = ref(false);
+const riskError = ref('');
+const activeRiskKey = ref('governance');
+const riskChapters = [
+  { key: 'governance', title: '综合风险与治理单元' },
+  { key: 'riceCd', title: '农产品镉风险' },
+  { key: 'soilCd', title: '土壤镉风险' },
+  { key: 'riceAs', title: '农产品砷风险' },
+  { key: 'soilAs', title: '土壤砷风险' },
+];
+const riskDataFor = key => riskProfile(riskSummaries.value?.[`${key}Summary`], riskSummaries.value?.[`${key}Map`]);
+const activeRiskProfile = computed(() => riskDataFor(activeRiskKey.value));
+const activeRiskFeatures = computed(() => riskGeoFeatures(riskSummaries.value?.riskGeometry, riskSummaries.value?.[`${activeRiskKey.value}Map`]));
+const riskHasModel = computed(() => riskDataFor('governance').areaMu > 0);
+const riskPlanUnitCount = computed(() => riskSummaries.value?.planUnitList?.unitList?.length || 0);
+const formatRiskArea = area => Number(area || 0).toLocaleString('zh-CN', { maximumFractionDigits: 1 });
+const causeFactors = [
+  { code: 'Cd', name: '镉', product: '稻米镉' },
+  { code: 'As', name: '砷', product: '稻米砷' },
+];
+const factorCause = code => causeReport(remoteSummaries.value, code);
+const formatCauseValue = (value, digits = 2) => value == null ? '—' : Number(value).toFixed(digits);
 const analysisYear = computed(() => dataSource.value === 'baseline' ? '2025' : questionnaireAnswers.value.surveyYear || String(new Date().getFullYear()));
 const activeMetric = computed(() => pollutionMetrics.find(metric => metric.key === analysisMetric.value) || pollutionMetrics[2]);
 const activeMetricSummary = computed(() => summarizeMetric(analysisPoints.value, analysisMetric.value));
 const metricSummary = key => summarizeMetric(analysisPoints.value, key);
 const formatAnalysisValue = (value, digits = 2) => value == null ? '—' : Number(value).toFixed(digits);
 const analysisSourceName = computed(() => ({ latest: '最新调查数据', baseline: '内置基础底数', supplement: '用户补充数据' })[dataSource.value]);
+const reportMetrics = [
+  { key: 'ntCd', title: '农产品镉' }, { key: 'soilStcd', title: '土壤镉' },
+  { key: 'naAs', title: '农产品砷' }, { key: 'soilStas', title: '土壤砷' },
+  { key: 'soilSph', title: '土壤 pH' }, { key: 'soilSom', title: '土壤有机质 SOM' },
+];
+function reportBins(key) {
+  const summary = metricSummary(key);
+  return summary.bins.map((bin, index) => ({
+    label: index === 0 ? `< ${formatAnalysisValue(bin.end)}` : index === 3 ? `≥ ${formatAnalysisValue(bin.start)}` : `${formatAnalysisValue(bin.start)}–${formatAnalysisValue(bin.end)}`,
+    count: bin.count,
+    percent: summary.count ? bin.count / summary.count * 100 : 0,
+  }));
+}
+function onAnalysisScroll(event) {
+  if (stage.value !== 4 && stage.value !== 5) return;
+  const scrollTop = event.target.getBoundingClientRect().top;
+  if (stage.value === 5) {
+    const chapters = [...event.target.querySelectorAll('[data-risk-key]')];
+    const currentRisk = chapters.filter(section => section.getBoundingClientRect().top - scrollTop < 170).at(-1) || chapters[0];
+    if (currentRisk?.dataset.riskKey && currentRisk.dataset.riskKey !== activeRiskKey.value) activeRiskKey.value = currentRisk.dataset.riskKey;
+    return;
+  }
+  const sections = [...event.target.querySelectorAll('[data-analysis-metric]')];
+  const current = sections.filter(section => section.getBoundingClientRect().top - scrollTop < 170).at(-1) || sections[0];
+  if (current?.dataset.analysisMetric && current.dataset.analysisMetric !== analysisMetric.value) analysisMetric.value = current.dataset.analysisMetric;
+}
+function jumpToReportMetric(key) {
+  sidebarScrollRef.value?.querySelector(`[data-analysis-metric="${key}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function jumpToRiskChapter(key) {
+  sidebarScrollRef.value?.querySelector(`[data-risk-key="${key}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+async function enterRiskAnalysis() {
+  stage.value = 5;
+  activeRiskKey.value = 'governance';
+  riskLoading.value = true;
+  riskError.value = '';
+  riskSummaries.value = null;
+  nextTick(() => sidebarScrollRef.value?.scrollTo({ top: 0 }));
+  try {
+    const countyCode = String(confirmedData.value?.scope?.countyCode || (confirmedData.value?.scope?.name?.includes('衡南') ? '430422' : ''));
+    if (countyCode !== '430422') throw new Error('当前风险评估接口仅接入衡南基地，暂无法获取该区域的模型结果。');
+    const params = new URLSearchParams({ zoneCode: 'ZONE4304220001', dataYear: analysisYear.value });
+    const response = await fetch(`/wrfx/api/risk/summary?${params}`);
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.message || '原系统风险评估接口读取失败。');
+    riskSummaries.value = result.data;
+    if (!riskHasModel.value) throw new Error('原系统尚未返回该年度的风险等级面积。');
+  } catch (error) { riskError.value = error.message || '风险评估数据加载失败。'; }
+  finally { riskLoading.value = false; }
+}
 const activeDistribution = computed(() => {
   const key = { soilSph: 'soilPh', soilSom: 'soilSom', soilStcd: 'soilCd', soilStas: 'soilAs', ntCd: 'riceCd', naAs: 'riceAs' }[analysisMetric.value];
   const original = remoteSummaries.value?.[key];
@@ -290,7 +366,7 @@ function geometryAreaSqm(geometry) {
   const polygons = geometry.type === 'Polygon' ? [geometry.coordinates] : geometry.type === 'MultiPolygon' ? geometry.coordinates : [];
   return polygons.reduce((total, polygon) => total + polygon.reduce((a, ring, i) => a + (i ? -1 : 1)*ringAreaSqm(ring), 0), 0);
 }
-const formattedArea = computed(() => scopeAreaSqm.value ? `${scopeAreaSqm.value.toLocaleString('zh-CN',{maximumFractionDigits:0})} m²` : '暂无有效耕地图斑面积');
+const formattedArea = computed(() => scopeAreaSqm.value ? `${(scopeAreaSqm.value * 0.0015).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2})} 亩` : '暂无有效耕地图斑面积');
 function selectAnswer(value) {
   questionnaireAnswers.value = { ...questionnaireAnswers.value, [currentQuestion.value.key]: value };
   if (questionnaireIndex.value < questions.value.length - 1) {
@@ -988,52 +1064,95 @@ async function confirmScope() {
         <span :class="{ active: stage === 1, completed: stage > 1 }"><b>01</b> 范围选择</span>
         <i></i><span :class="{ active: stage === 2, completed: stage > 2 }"><b>02</b> 生产条件</span>
         <i></i><span :class="{ active: stage === 3, completed: stage > 3 }"><b>03</b> 数据核对</span>
-        <i></i><span :class="{ active: stage === 4 }"><b>04</b> 污染分析</span>
-        <i></i><span><b>05</b> 风险与方案</span>
+        <i></i><span :class="{ active: stage === 4, completed: stage > 4 }"><b>04</b> 污染分析</span>
+        <i></i><span :class="{ active: stage === 5 }"><b>05</b> 风险与方案</span>
         <i></i><span><b>06</b> 分析报告</span>
       </nav>
 
       <div class="wrfx-top-status"><span class="status-light"></span>独立模块 <b>/wrfx</b></div>
     </header>
 
-    <section ref="workspaceRef" class="wrfx-workspace" :style="{ '--wrfx-optimal-sidebar-width': `${optimalSidebarWidth}px`, ...(sidebarWidth == null ? {} : { '--wrfx-sidebar-width': `${sidebarWidth}px` }) }">
+    <section ref="workspaceRef" class="wrfx-workspace" :style="{ '--wrfx-optimal-sidebar-width': `${stage >= 4 ? Math.max(460,Math.round(workspaceWidth * .35)) : optimalSidebarWidth}px`, ...(sidebarWidth == null ? (stage >= 4 ? { '--wrfx-sidebar-width': '35%' } : {}) : { '--wrfx-sidebar-width': `${sidebarWidth}px` }) }">
       <aside class="wrfx-sidebar tech-frame">
         <div class="wrfx-sidebar-head">
           <div class="wrfx-sidebar-head-inner">
           <span class="wrfx-head-icon"><PhMapTrifold weight="duotone" /></span>
-          <div><h1>{{ stage === 2 ? '客户问卷调研' : stage === 3 ? '数据核对' : stage === 4 ? '污染现状分析' : '分析范围选择' }}</h1><p>{{ stage === 2 ? '逐项确认片区生产与污染源信息' : stage === 3 ? '核对数据来源与点位指标差异' : stage === 4 ? '查看采样点分布与指标统计' : '先确定区域，再查看污染状况' }}</p></div>
+          <div><h1>{{ stage === 2 ? '客户问卷调研' : stage === 3 ? '数据核对' : stage === 4 ? '污染现状分析' : stage === 5 ? '风险与方案分析' : '分析范围选择' }}</h1><p>{{ stage === 2 ? '逐项确认片区生产与污染源信息' : stage === 3 ? '核对数据来源与点位指标差异' : stage === 4 ? '查看采样点分布与指标统计' : stage === 5 ? '查看模型风险等级与分区管理方向' : '先确定区域，再查看污染状况' }}</p></div>
           <span class="wrfx-live-dot" title="模块已就绪"></span>
           </div>
         </div>
 
-        <div ref="sidebarScrollRef" class="wrfx-sidebar-scroll">
+        <div ref="sidebarScrollRef" class="wrfx-sidebar-scroll" @scroll.passive="onAnalysisScroll">
           <div class="wrfx-sidebar-content">
           <template v-if="stage === 4">
             <div class="wrfx-intro-label"><span></span>第四步 · 污染分析</div>
             <h2>片区污染现状</h2>
-            <p class="wrfx-intro-copy">基于已确认的数据来源，查看采样点指标及其空间分布。</p>
+            <p class="wrfx-intro-copy">基于本次采用的点位数据，依次阅读重金属、土壤性质与污染来源。</p>
             <div class="wrfx-analysis-context"><strong><PhMapPin />{{ confirmedData?.scope.name }}</strong><span>{{ analysisSourceName }} · {{ analysisYear }} 年 · {{ analysisPoints.length }} 个点位</span></div>
             <div v-if="analysisLoading" class="wrfx-analysis-message">正在读取原系统点位和指标汇总…</div>
             <div v-else-if="analysisError" class="wrfx-analysis-message error">{{ analysisError }}</div>
             <template v-else-if="analysisPoints.length">
-              <div class="wrfx-analysis-section-title">重金属指标 <small>选择指标后同步更新地图</small></div>
-              <div class="wrfx-analysis-metric-tabs">
-                <button v-for="metric in pollutionMetrics.filter(item => item.group === 'soil' || item.group === 'rice')" :key="metric.key" type="button" :class="{ active: analysisMetric === metric.key }" @click="analysisMetric = metric.key">{{ metric.label }}</button>
-              </div>
-              <div class="wrfx-analysis-stat-grid">
-                <div><small>有效样本</small><strong>{{ activeMetricSummary.count }}</strong><span>个点位</span></div>
-                <div><small>平均值</small><strong>{{ formatAnalysisValue(activeMetricSummary.mean) }}</strong><span>{{ activeMetric.unit }}</span></div>
-                <div><small>范围</small><strong>{{ formatAnalysisValue(activeMetricSummary.min) }}–{{ formatAnalysisValue(activeMetricSummary.max) }}</strong><span>{{ activeMetric.unit }}</span></div>
-                <div><small>标准差</small><strong>{{ formatAnalysisValue(activeMetricSummary.stddev) }}</strong><span>{{ activeMetric.unit }}</span></div>
-              </div>
-              <div class="wrfx-analysis-section-title">{{ activeMetric.label }}含量分布 <small>{{ dataSource === 'supplement' || !remoteSummaries ? '按样本值分组' : '原系统区间统计' }}</small></div>
-              <div class="wrfx-analysis-bars"><div v-for="(bin, index) in activeDistribution" :key="`${analysisMetric}-${index}`"><span>{{ bin.label }}</span><i><b :style="{ width: `${activeMetricSummary.count ? bin.count / activeMetricSummary.count * 100 : 0}%`, '--bar-color': ['#43dc4a','#eae940','#ff9d32','#d83ade'][index % 4] }"></b></i><strong>{{ bin.count }}</strong></div></div>
-              <p class="wrfx-analysis-method">颜色按样本含量区间分组，用于查看空间分布；不代表法定超标或风险等级。</p>
-              <div class="wrfx-analysis-section-title">土壤性质 <small>同批点位记录</small></div>
-              <div class="wrfx-soil-properties"><button v-for="metric in pollutionMetrics.filter(item => item.group === 'property')" :key="metric.key" type="button" :class="{ active: analysisMetric === metric.key }" @click="analysisMetric = metric.key"><span>{{ metric.label }}</span><strong>{{ formatAnalysisValue(metricSummary(metric.key).mean) }}</strong><small>{{ metric.unit || '平均值' }}</small></button></div>
-              <div class="wrfx-analysis-note"><PhInfo />点位来自原系统；区间统计优先使用原系统接口，范围不一致或接口无结果时按当前点位计算。超标率和污染来源需对应标准与模型结果。</div>
+              <div class="wrfx-report-overview"><small>01 / 片区概况</small><p><b>{{ confirmedData?.scope.name }}</b>涉及耕地约 <b>{{ formattedArea }}</b>、<b>{{ confirmedData?.plots.length || 0 }}</b> 个耕地图斑。本次采用 {{ analysisSourceName }}（{{ analysisYear }} 年），边界内共有 <b>{{ analysisPoints.length }}</b> 个采样点。</p></div>
+              <div class="wrfx-analysis-section-title">整体污染情况 <small>六项指标 · 逐点统计</small></div>
+              <p class="wrfx-report-lead">以下先按农产品镉、土壤镉、农产品砷、土壤砷的顺序查看含量，再看土壤 pH 和有机质。滚动到相应章节时，右侧地图同步展示该指标的采样点分布。</p>
+              <div class="wrfx-report-summary"><div v-for="item in reportMetrics.slice(0,4)" :key="item.key"><small>{{ item.title }}均值</small><strong>{{ formatAnalysisValue(metricSummary(item.key).mean) }}</strong><span>mg/kg · {{ metricSummary(item.key).count }} 个有效样本</span></div></div>
+              <div class="wrfx-report-index"><button v-for="item in reportMetrics" :key="item.key" type="button" :class="{active:analysisMetric===item.key}" @click="jumpToReportMetric(item.key)">{{ item.title }}</button></div>
+              <section v-for="(item,index) in reportMetrics" :key="item.key" class="wrfx-report-chapter" :data-analysis-metric="item.key">
+                <div class="wrfx-report-chapter-head"><small>{{ String(index+2).padStart(2,'0') }} / {{ index < 4 ? '重金属含量' : '土壤性质' }}</small><h3>{{ item.title }}</h3></div>
+                <p v-if="metricSummary(item.key).count" class="wrfx-report-prose">本次有 <b>{{ metricSummary(item.key).count }}</b> 个有效样本，平均值为 <b>{{ formatAnalysisValue(metricSummary(item.key).mean) }} {{ pollutionMetrics.find(metric=>metric.key===item.key)?.unit }}</b>，观测范围 <b>{{ formatAnalysisValue(metricSummary(item.key).min) }}–{{ formatAnalysisValue(metricSummary(item.key).max) }}</b>，标准差 <b>{{ formatAnalysisValue(metricSummary(item.key).stddev) }}</b>。下图按本批样本含量分组，地图显示对应点位的空间分布。</p>
+                <p v-else class="wrfx-report-prose">当前点位中缺少该指标的有效值，暂不能形成含量统计。</p>
+                <div v-if="metricSummary(item.key).count" class="wrfx-report-figure"><div class="wrfx-report-figure-title">{{ item.title }}含量分布 <small>样本数 / 占比</small></div><div v-for="(bin,binIndex) in reportBins(item.key)" :key="binIndex" class="wrfx-report-bar"><span>{{ bin.label }}</span><i><b :style="{width:`${bin.percent}%`,background:['#41d984','#d7dd49','#ef9d42','#d965a2'][binIndex]}"></b></i><strong>{{ bin.count }} <small>({{ bin.percent.toFixed(0) }}%)</small></strong></div><p>单位：{{ pollutionMetrics.find(metric=>metric.key===item.key)?.unit || 'pH' }}。分组依据当前样本分位数，不代表超标等级。</p></div>
+              </section>
+              <div class="wrfx-analysis-section-title">污染成因分析 <small>原系统模型 · 镉与砷</small></div>
+              <p class="wrfx-report-lead">以下读取原系统的超标贡献、土壤输入输出汇总及趋势预测接口。贡献率解释稻米指标的模型归因；输入输出量描述土壤重金属迁移过程，两者口径不同。</p>
+              <section v-for="(factor, factorIndex) in causeFactors" :key="factor.code" class="wrfx-report-chapter wrfx-report-cause" :data-analysis-metric="factor.code === 'Cd' ? 'soilStcd' : 'soilStas'">
+                <div class="wrfx-report-chapter-head"><small>{{ String(8 + factorIndex).padStart(2, '0') }} / 成因分析</small><h3>{{ factor.name }}：超标贡献与土壤收支</h3></div>
+                <template v-if="factorCause(factor.code).contributions.length">
+                  <p class="wrfx-report-prose">原系统将{{ factor.product }}超标的模型贡献分解为土壤污染、农艺措施、水稻品种和土壤 pH。当前贡献最大的因素是 <b>{{ factorCause(factor.code).contributions[0].label }}（{{ formatCauseValue(factorCause(factor.code).contributions[0].value) }}%）</b>。这些比例是模型归因结果，不能直接视为污染物质来源或治理效果。</p>
+                  <div class="wrfx-report-figure"><div class="wrfx-report-figure-title">{{ factor.product }}超标贡献 <small>原系统 getCauseSum</small></div><div v-for="(part, partIndex) in factorCause(factor.code).contributions" :key="part.label" class="wrfx-report-bar"><span>{{ part.label }}</span><i><b :style="{width:`${Math.max(0, Math.min(100, part.value))}%`,background:['#42d7e8','#68d990','#dfc759','#dc8396'][partIndex]}"></b></i><strong>{{ formatCauseValue(part.value) }}%</strong></div></div>
+                </template>
+                <p v-else class="wrfx-report-prose">原系统暂未返回{{ factor.product }}超标贡献模型结果。</p>
+                <template v-if="factorCause(factor.code).inputTotal !== null">
+                  <p class="wrfx-report-prose">{{ factor.name }}输入端由大气沉降、灌溉水、农业投入品构成，分项均值合计 <b>{{ formatCauseValue(factorCause(factor.code).inputTotal, 4) }} g/亩/年</b>；其中 <b>{{ [...factorCause(factor.code).inputs].sort((a,b)=>b.value-a.value)[0]?.label }}</b>最大。{{ factorCause(factor.code).outputTotal !== null ? `输出端三类分项均值合计 ${formatCauseValue(factorCause(factor.code).outputTotal, 4)} g/亩/年，二者参考差额 ${formatCauseValue(factorCause(factor.code).net, 4)} g/亩/年。各分项样本数可能不同，此差额不能直接当作逐点净累积量。` : '输出端数据不完整，暂不计算参考差额。' }}</p>
+                  <div class="wrfx-report-figure"><div class="wrfx-report-figure-title">土壤{{ factor.name }}输入路径 <small>g/亩/年 · 原系统 sample-sum/list</small></div><div v-for="(part, partIndex) in factorCause(factor.code).inputs" :key="part.label" class="wrfx-report-bar"><span>{{ part.label }}</span><i><b :style="{width:`${factorCause(factor.code).inputTotal ? part.value / factorCause(factor.code).inputTotal * 100 : 0}%`,background:['#47a9eb','#64cf91','#e9b34d'][partIndex]}"></b></i><strong>{{ formatCauseValue(part.value, 4) }}</strong></div></div>
+                </template>
+                <p v-else class="wrfx-report-prose">原系统输入端汇总不完整，暂不判断主要输入路径或土壤收支。</p>
+                <p v-if="factorCause(factor.code).soilTrend.length > 1" class="wrfx-report-prose">原系统土壤{{ factor.name }}趋势模型给出 {{ factorCause(factor.code).soilTrend[0].year }} 年 <b>{{ formatCauseValue(factorCause(factor.code).soilTrend[0].eval, 4) }}</b> 至 {{ factorCause(factor.code).soilTrend.at(-1).year }} 年 <b>{{ formatCauseValue(factorCause(factor.code).soilTrend.at(-1).eval, 4) }} mg/kg</b> 的预测值。趋势为模型预测，不是逐年实测数据。</p>
+                <div class="wrfx-report-scope-note"><PhInfo />原系统模型以衡南基地为计算范围，贡献模型样本 {{ factorCause(factor.code).modelSamples ?? '未知' }} 个；本报告当前边界采用 {{ analysisPoints.length }} 个点位{{ dataSource === 'supplement' ? '和上传 Excel 数据' : '' }}。上述归因、收支及趋势供片区成因研判参考，不能视为对当前边界重新建模的结果。</div>
+              </section>
+              <section class="wrfx-report-chapter wrfx-report-sources"><div class="wrfx-report-chapter-head"><small>10 / 现场核查</small><h3>污染源线索与建议核查方向</h3></div><p>问卷记录：片区内污染企业 {{ questionnaireAnswers.enterpriseCount || '待调研' }} 家；周边 5 km 工矿企业为“{{ questionnaireAnswers.industry5km || '待调研' }}”，灌溉水源为“{{ questionnaireAnswers.waterSource || '待调研' }}”，污染源监测为“{{ questionnaireAnswers.sourceMonitoring || '待调研' }}”。</p><p>可先核查模型输入量较大的路径对应的水、尘和投入品实测记录，再结合土壤与稻米同点数据、品种和 pH 信息复核归因。现有汇总接口未给出片区内具体排放主体的源解析结果。</p></section>
+              <div class="wrfx-analysis-note"><PhInfo />统计仅依据当前边界内已读取的点位。超标率需结合适用标准、农产品类别和土壤 pH 等条件判定；本页含量分组不代表超标结论。</div>
+              <button class="wrfx-next-button wrfx-report-next" type="button" @click="enterRiskAnalysis"><PhArrowRight />进入第五步 · 风险与方案分析</button>
             </template>
             <button class="wrfx-back-button" @click="stage = 3">上一步　返回数据核对</button>
+          </template>
+          <template v-else-if="stage === 5">
+            <div class="wrfx-intro-label"><span></span>第五步 · 风险与方案</div>
+            <h2>片区风险与分区方案</h2>
+            <p class="wrfx-intro-copy">以原系统风险等级和图斑评价为依据，先看综合风险，再逐项分析镉、砷，最后梳理分区管理方向。</p>
+            <div class="wrfx-analysis-context"><strong><PhMapPin />{{ confirmedData?.scope.name }}</strong><span>{{ analysisYear }} 年 · {{ analysisSourceName }} · 当前边界 {{ confirmedData?.plots.length || 0 }} 个图斑</span></div>
+            <div v-if="riskLoading" class="wrfx-analysis-message">正在读取原系统五级风险面积、图斑等级和治理单元…</div>
+            <div v-else-if="riskError" class="wrfx-analysis-message error">{{ riskError }}</div>
+            <template v-else-if="riskHasModel">
+              <section class="wrfx-report-overview" data-risk-key="governance"><small>01 / 风险概览</small><p>原系统 {{ riskSummaries?.zone?.zoneName || '衡南基地' }}模型共评价 <b>{{ riskDataFor('governance').plotCount }}</b> 个图斑，五级风险汇总面积约 <b>{{ formatRiskArea(riskDataFor('governance').areaMu) }} 亩</b>。其中中风险及以上约 <b>{{ formatRiskArea(riskDataFor('governance').priorityMu) }} 亩</b>，占模型汇总面积 <b>{{ riskDataFor('governance').priorityPercent.toFixed(1) }}%</b>。右侧地图按综合治理单元等级着色。</p></section>
+              <div class="wrfx-report-risk-highlights"><div><small>模型评价图斑</small><strong>{{ riskDataFor('governance').plotCount }}</strong><span>个 · 原系统逐块结果</span></div><div><small>中风险及以上</small><strong>{{ formatRiskArea(riskDataFor('governance').priorityMu) }}</strong><span>亩 · 原系统汇总面积</span></div></div>
+              <div class="wrfx-report-risk-strip" aria-label="综合风险面积占比"><span v-for="level in riskDataFor('governance').levels" :key="level.level" :style="{width:`${riskDataFor('governance').areaMu ? level.areaMu / riskDataFor('governance').areaMu * 100 : 0}%`, background:level.color}" :title="`${level.label} ${formatRiskArea(level.areaMu)} 亩`"></span></div>
+              <div class="wrfx-report-risk-key"><span v-for="level in riskDataFor('governance').levels" :key="level.level"><i :style="{background:level.color}"></i>{{ level.label }} {{ formatRiskArea(level.areaMu) }} 亩</span></div>
+              <div class="wrfx-report-index wrfx-risk-index"><button v-for="item in riskChapters" :key="item.key" type="button" :class="{active:activeRiskKey===item.key}" @click="jumpToRiskChapter(item.key)">{{ item.title }}</button></div>
+              <section v-for="(item,index) in riskChapters.slice(1)" :key="item.key" class="wrfx-report-chapter wrfx-report-risk-chapter" :data-risk-key="item.key">
+                <div class="wrfx-report-chapter-head"><small>{{ String(index+2).padStart(2,'0') }} / 单项风险</small><h3>{{ item.title }}</h3></div>
+                <p class="wrfx-report-prose">原系统对 <b>{{ riskDataFor(item.key).plotCount }}</b> 个图斑给出{{ item.title }}评价，风险面积汇总约 <b>{{ formatRiskArea(riskDataFor(item.key).areaMu) }} 亩</b>。中风险及以上约 <b>{{ formatRiskArea(riskDataFor(item.key).priorityMu) }} 亩</b>，占 <b>{{ riskDataFor(item.key).priorityPercent.toFixed(1) }}%</b>。{{ riskDataFor(item.key).priorityMu > 0 ? '高等级图斑应作为后续复核与分区管理的重点。' : '本次原系统模型未将图斑列入中风险及以上等级。' }}地图同步切换到该指标的逐块风险等级。</p>
+                <div class="wrfx-risk-level-list"><div v-for="level in riskDataFor(item.key).levels" :key="level.level"><i :style="{background:level.color}"></i><span>{{ level.label }}</span><strong>{{ formatRiskArea(level.areaMu) }} 亩</strong><small>{{ level.plots }} 个图斑</small></div></div>
+                <p class="wrfx-risk-caption">风险等级来自原系统图斑模型；图斑数量与等级面积分别按接口逐块结果和汇总结果列示。</p>
+              </section>
+              <section class="wrfx-report-chapter wrfx-report-risk-chapter" data-risk-key="governance"><div class="wrfx-report-chapter-head"><small>06 / 分区管理</small><h3>方案方向与复核顺序</h3></div>
+                <p class="wrfx-report-prose">综合治理单元中，高风险和极高风险约 <b>{{ formatRiskArea(riskDataFor('governance').levels[3].areaMu + riskDataFor('governance').levels[4].areaMu) }} 亩</b>；中风险约 <b>{{ formatRiskArea(riskDataFor('governance').levels[2].areaMu) }} 亩</b>。建议按图斑等级组织复核：先核对高等级图斑的采样、农产品检测和种植记录，再结合土壤 pH、灌溉水及大气沉降监测，确定具体措施和实施范围。</p>
+                <div class="wrfx-risk-actions"><div><b>优先复核 · 高与极高风险</b><span>核实图斑边界、采样年份和产品检测结果；措施选择须结合现场调查与主管部门要求。</span></div><div><b>持续管理 · 中风险</b><span>补充同点复测，核对灌溉与农业投入品，比较不同地块的风险变化。</span></div><div><b>常规监测 · 低与无风险</b><span>保留年度监测与数据更新，不将模型等级直接等同于永久安全结论。</span></div></div>
+                <div class="wrfx-report-scope-note"><PhInfo />原系统方案接口当前返回 {{ riskPlanUnitCount }} 个已形成的治理单元方案。上方是依据风险等级安排的核查与管理方向，不代表已完成的工程设计或治理效果预测。</div>
+              </section>
+              <div class="wrfx-analysis-note"><PhInfo />原系统风险等级按衡南基地 {{ analysisYear }} 年模型计算；面积汇总可能因分级取整与边界面积略有差异。地图使用原系统 38 个图斑几何并裁切至当前选定边界；上传 Excel 影响第四步的点位统计，尚未触发原系统风险模型重算。</div>
+            </template>
+            <button class="wrfx-back-button" type="button" @click="stage = 4">上一步　返回污染分析</button>
           </template>
           <template v-else-if="stage === 3">
             <div class="wrfx-intro-label"><span></span>第三步 · 数据核对</div>
@@ -1203,14 +1322,15 @@ async function confirmScope() {
           <div class="wrfx-map-tabs"><span class="active"><PhMapTrifold />区域地图</span><span><PhDatabase />数据覆盖</span></div>
           <div class="wrfx-map-source"><span class="status-light"></span>天地图影像 <b>CGCS2000</b></div>
         </div>
-        <ScopeMap ref="mapRef" :drawing="drawing" :picking="stage === 1 && mode === 'cooperative'" :analysis-points="analysisPoints" :analysis-metric="analysisMetric" :analysis-boundaries="analysisBoundaries" :show-analysis="stage === 4" @polygon-selected="onPolygonSelected" @point-picked="onMapPointPicked" />
-        <div v-if="stage !== 4" class="wrfx-map-search">
+        <ScopeMap ref="mapRef" :drawing="drawing" :picking="stage === 1 && mode === 'cooperative'" :analysis-points="analysisPoints" :analysis-metric="analysisMetric" :analysis-boundaries="analysisBoundaries" :show-analysis="stage === 4" :risk-features="activeRiskFeatures" :risk-boundary="confirmedData?.boundary" :show-risk="stage === 5 && activeRiskFeatures.length > 0" @polygon-selected="onPolygonSelected" @point-picked="onMapPointPicked" />
+        <div v-if="stage < 4" class="wrfx-map-search">
           <PhMagnifyingGlass />
           <input v-model="locationQuery" :placeholder="mode === 'cooperative' ? '搜索合作社名称、地名或地址' : '搜索地名或地址'" @keydown.enter.prevent="searchCooperative" />
           <button aria-label="搜索地点" :disabled="searching" @click="searchCooperative"><PhArrowRight /></button>
         </div>
-        <div v-if="stage !== 4" class="wrfx-map-tip"><span class="wrfx-tip-icon"><PhMapPin /></span><div><strong>{{ mode === 'cooperative' ? '点击地图选择合作社位置' : '选择分析范围' }}</strong><small>{{ mode === 'polygon' ? '点击“开始圈选”，在地图上绘制多边形边界' : mode === 'cooperative' ? '也可在左侧搜索合作社名称、地名或地址' : '可在左侧选择行政区或切换至地图圈选' }}</small></div></div>
+        <div v-if="stage < 4" class="wrfx-map-tip"><span class="wrfx-tip-icon"><PhMapPin /></span><div><strong>{{ mode === 'cooperative' ? '点击地图选择合作社位置' : '选择分析范围' }}</strong><small>{{ mode === 'polygon' ? '点击“开始圈选”，在地图上绘制多边形边界' : mode === 'cooperative' ? '也可在左侧搜索合作社名称、地名或地址' : '可在左侧选择行政区或切换至地图圈选' }}</small></div></div>
         <div v-if="stage === 4 && analysisPoints.length" class="wrfx-analysis-map-legend"><strong>{{ activeMetric.label }} · {{ analysisYear }} 年</strong><span v-for="(bin, index) in activeDistribution" :key="index"><i :style="{ background: ['#43dc4a','#eae940','#ff9d32','#d83ade'][index % 4] }"></i>{{ bin.label }} <b>{{ bin.count }}</b></span><small>分组展示，不代表超标等级</small></div>
+        <div v-if="stage === 5 && riskHasModel" class="wrfx-analysis-map-legend wrfx-risk-map-legend"><strong>{{ riskChapters.find(item=>item.key===activeRiskKey)?.title }} · {{ analysisYear }} 年</strong><span v-for="level in activeRiskProfile.levels" :key="level.level"><i :style="{background:level.color}"></i>{{ level.label }} <b>{{ formatRiskArea(level.areaMu) }} 亩</b></span><small>原系统基地级风险面积 · 地图按当前边界裁切</small></div>
         <div class="wrfx-map-legend"><i></i>{{ selectedScope?.name || '自定义范围' }} <span></span>{{ selectedScope?.type === 'administrative' ? 'GeoServer 区县边界' : selectedScope?.type === 'cooperative' ? `${selectedScope.longitude.toFixed(5)}, ${selectedScope.latitude.toFixed(5)}` : '地图圈选' }}</div>
         <div class="wrfx-map-tools">
           <button title="放大" @click="mapRef?.zoom(1)"><PhPlus /></button>

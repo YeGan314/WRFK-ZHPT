@@ -302,6 +302,10 @@ function pointAnalysisProxyPlugin(env, base) {
           }
           const tasks = [
             ["causeSum", "/cphmp/zone/getCauseSum", { zoneCode, dataYear }],
+            ["inputSum", "/cphmp/sample-sum/list", { zoneCode, dataYear, sumClass: "1", sumType: 0 }],
+            ["outputSum", "/cphmp/sample-sum/list", { zoneCode, dataYear, sumClass: "2", sumType: 0 }],
+            ["soilTrend", "/cphmp/sample-sum/trendForecast", { zoneCode, dataYear, number: 10, sumType: 0 }],
+            ["riceTrend", "/cphmp/sample-sum/trendForecast", { zoneCode, dataYear, number: 10, sumType: 0, subType: "Rice" }],
             ...[
               ["soilCd", "10", "Cd"], ["soilAs", "10", "As"],
               ["riceCd", "9", "Cd"], ["riceAs", "9", "As"],
@@ -315,6 +319,38 @@ function pointAnalysisProxyPlugin(env, base) {
           res.statusCode = 502;
           res.end(JSON.stringify({ message: error.message || "污染现状汇总接口读取失败。" }));
         }
+      });
+      server.middlewares.use("/wrfx/api/risk/summary", async (req, res) => {
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (req.method !== "GET") { res.statusCode = 405; res.end(JSON.stringify({ message: "Method Not Allowed" })); return; }
+        try {
+          const url = new URL(req.url || "", "http://localhost");
+          const zoneCode = url.searchParams.get("zoneCode") || "";
+          const dataYear = url.searchParams.get("dataYear") || "";
+          if (!/^ZONE\d{10}$/.test(zoneCode) || !/^\d{4}$/.test(dataYear)) { res.statusCode = 400; res.end(JSON.stringify({ message: "示范区编码或年份无效。" })); return; }
+          const tasks = ["riceCd", "riceAs", "soilCd", "soilAs", "governance"].flatMap(key => {
+            const categoryCode = key === "governance" ? "27" : key.startsWith("rice") ? "9" : "10";
+            const factorsCode = key === "governance" ? "Cd&As" : key.endsWith("Cd") ? "Cd" : "As";
+            const params = { zoneCode, dataYear, categoryCode, factorsCode, evalutionType: 3, sumType: 0 };
+            return [[`${key}Summary`, "/cphmp/risk-point/getFeildRiskSum", params], [`${key}Map`, "/cphmp/risk-point/getRiskMap", { zoneCode, dataYear, categoryCode, factorsCode, evalutionType: 3 }]];
+          });
+          tasks.push(["planUnitList", "/risk/planflow/getUnitList", { zoneCode, dataYear }]);
+          const settled = await Promise.allSettled(tasks.map(([, path, params]) => client.request(path, { params })));
+          const results = Object.fromEntries(tasks.map(([key], index) => [key, settled[index].status === "fulfilled" ? settled[index].value.data : null]));
+          try {
+            const zones = await client.request("/cphmp/zone/list", { params: { zoneCode } });
+            const zone = Array.isArray(zones.data) ? zones.data.find(item => item.zoneCode === zoneCode) || null : null;
+            results.zone = zone ? { zoneCode: zone.zoneCode, zoneName: zone.zoneName, zoneArea: zone.zoneArea } : null;
+            const geometryPath = zone?.zoneTargetGeojson;
+            if (typeof geometryPath === "string" && /^\/rsfile\/admin-api\/infra\/file\//.test(geometryPath)) {
+              const apiBaseUrl = (env.CPHMP_API_BASE_URL || process.env.CPHMP_API_BASE_URL || "http://113.240.240.3:8099/dev-api");
+              const geometryResponse = await fetch(new URL(geometryPath, apiBaseUrl), { signal: AbortSignal.timeout(15000) });
+              const geometry = geometryResponse.ok ? await geometryResponse.json() : null;
+              results.riskGeometry = geometry?.type === "FeatureCollection" && Array.isArray(geometry.features) ? geometry : null;
+            }
+          } catch { results.zone = null; results.riskGeometry = null; }
+          res.end(JSON.stringify({ data: results }));
+        } catch (error) { res.statusCode = 502; res.end(JSON.stringify({ message: error.message || "风险评估接口读取失败。" })); }
       });
       server.middlewares.use("/wrfx/api/data-check/points", async (req, res) => {
         res.setHeader("Content-Type", "application/json; charset=utf-8");
