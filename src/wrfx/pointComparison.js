@@ -67,3 +67,16 @@ export function comparePoints(apiPoints, uploadPoints) {
     rows: significant.length ? significant : changed.length ? changed.slice(0, 3)
       : incomplete.length ? incomplete.slice(0, 3) : [...records].sort((a, b) => a.serial - b.serial).slice(0, 3) };
 }
+
+export function uploadedRowsToPoints(uploadPoints) {
+  return [...uploadPoints].flatMap(([serial, row]) => {
+    const lon = numeric(row['经度']);
+    const lat = numeric(row['纬度']);
+    if (lon === null || lat === null || lon < -180 || lon > 180 || lat < -90 || lat > 90) return [];
+    return [{ samplingPointsCode: `UPLOAD${String(serial).padStart(5, '0')}`, lon, lat,
+      ...Object.fromEntries([
+        ['soilStcd', '土壤总镉'], ['ntCd', '农产品总镉'], ['soilStas', '土壤总砷'],
+        ['naAs', '农产品总砷'], ['soilSph', '土壤pH'], ['soilSom', '土壤有机质'],
+      ].map(([key, header]) => [key, numeric(row[header])])) }];
+  });
+}

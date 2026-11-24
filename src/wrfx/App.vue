@@ -27,7 +27,7 @@ import {
 import ScopeMap from "./components/ScopeMap.vue";
 import { displayName, filterByParent, findCountyForPolygon, findCountiesIntersectingRing, findCultivatedPlotLayer, geoserverEndpoint, loadAdministrativeBoundary, loadAdministrativeRegions, loadCultivatedPlots, loadCultivatedPlotsInBoundary } from "./geoServer.js";
 import { normalizeLocations } from "../lib/analysis.js";
-import { comparePoints, readSupplementPoints } from "./pointComparison.js";
+import { comparePoints, readSupplementPoints, uploadedRowsToPoints } from "./pointComparison.js";
 import { pointsInsideBoundary, pollutionMetrics, summarizeMetric, withSupplementPoints } from "./pollutionAnalysis.js";
 import { causeReport } from "./causeAnalysis.js";
 import { riskGeoFeatures, riskProfile } from "./riskAnalysis.js";
@@ -194,7 +194,7 @@ function metricText(value) {
 }
 const comparisonSummary = computed(() => {
   const result = pointComparison.value;
-  if (!result) return '上传 Excel 后，将按序号逐点核对三项指标。';
+  if (!result) return uploadedPoints.value ? '未取得可匹配的原始点位，不进行差异核对；分析将直接采用上传的 Excel 数据。' : '上传 Excel 后，如有可匹配的原始点位，将按序号核对三项指标。';
   const base = `已匹配 ${result.matched} / ${result.totalUpload} 条 Excel 记录（接口 ${result.totalApi} 条）。`;
   if (!result.matched) return `${base}未找到可核对的同点记录。`;
   const missing = result.incomplete ? `另有 ${result.incomplete} 条缺少指标，无法完整判断偏差。` : '';
@@ -249,6 +249,11 @@ async function confirmDataSource() {
   nextTick(() => sidebarScrollRef.value?.scrollTo({ top: 0 }));
   try {
     const scope = confirmedData.value?.scope;
+    if (dataSource.value === 'supplement' && uploadedPoints.value && !pointComparison.value) {
+      analysisPoints.value = pointsInsideBoundary(uploadedRowsToPoints(uploadedPoints.value), confirmedData.value?.boundary);
+      if (!analysisPoints.value.length) throw new Error('Excel 中没有位于圈选范围内的有效经纬度点位。');
+      return;
+    }
     const countyCode = String(scope?.countyCode || (scope?.name?.includes('衡南') ? '430422' : ''));
     if (countyCode !== '430422') throw new Error('当前污染现状接口仅已接入衡南基地；该范围暂无法读取原系统点位。');
     const zoneCode = 'ZONE4304220001';
@@ -290,22 +295,46 @@ async function onSupplementFileChange(event) {
   dataCheckNotice.value = `正在核对 ${file.name} 的点位数据…`;
   try {
     const uploaded = await readSupplementPoints(file);
-    const countyCode = [...uploaded.countyCodes][0];
-    if (uploaded.countyCodes.size !== 1 || countyCode !== '430422') {
-      throw new Error('当前已接入衡南基地点位接口；请上传行政区编码为 430422 的衡南数据。');
-    }
     const scope = confirmedData.value?.scope;
+    if (scope?.type === 'polygon' || scope?.type === 'customGeojson') {
+      const located = pointsInsideBoundary(uploadedRowsToPoints(uploaded.points), confirmedData.value?.boundary);
+      if (!located.length) throw new Error('Excel 中没有位于圈选范围内的有效经纬度点位，请检查“经度、纬度”列。');
+      uploadedPoints.value = uploaded.points;
+      supplementFile.value = file;
+      userSupplementData.value = true;
+      dataCheckNotice.value = `已读取 ${file.name}：自定义范围内 ${located.length} 个点位。未取得对应原始点位，直接按上传数据分析。`;
+      return;
+    }
+    const countyCode = [...uploaded.countyCodes][0];
     if (scope?.countyCode && String(scope.countyCode) !== countyCode) {
       throw new Error('Excel 行政区编码与当前分析范围不一致。');
     }
+    if (uploaded.countyCodes.size !== 1 || countyCode !== '430422') {
+      const located = pointsInsideBoundary(uploadedRowsToPoints(uploaded.points), confirmedData.value?.boundary);
+      if (!located.length) throw new Error('Excel 中没有位于分析范围内的有效经纬度点位。');
+      uploadedPoints.value = uploaded.points;
+      supplementFile.value = file;
+      userSupplementData.value = true;
+      dataCheckNotice.value = `已读取 ${file.name}：范围内 ${located.length} 个点位。原系统无对应基地数据，直接按上传数据分析。`;
+      return;
+    }
     const surveyYear = questionnaireAnswers.value.surveyYear || String(new Date().getFullYear());
     const params = new URLSearchParams({ zoneCode: 'ZONE4304220001', surveyYear });
-    const response = await fetch(`/wrfx/api/data-check/points?${params}`);
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.message || '点位接口读取失败。');
-    if (!Array.isArray(result.data) || !result.data.length) throw new Error('原系统未返回该年度的点位数据，无法完成核对。');
-    const comparison = comparePoints(result.data, uploaded.points);
-    if (!comparison.matched) throw new Error('Excel 序号与原系统点位未能匹配，请核对文件和调查年度。');
+    let result;
+    try {
+      const response = await fetch(`/wrfx/api/data-check/points?${params}`);
+      if (response.ok) result = await response.json();
+    } catch { /* 原始点位不可用时仍可使用上传数据。 */ }
+    const comparison = Array.isArray(result?.data) && result.data.length ? comparePoints(result.data, uploaded.points) : null;
+    if (!comparison?.matched) {
+      const located = pointsInsideBoundary(uploadedRowsToPoints(uploaded.points), confirmedData.value?.boundary);
+      if (!located.length) throw new Error('原系统点位不可用，且 Excel 中没有位于分析范围内的有效经纬度点位。');
+      uploadedPoints.value = uploaded.points;
+      supplementFile.value = file;
+      userSupplementData.value = true;
+      dataCheckNotice.value = `已读取 ${file.name}：范围内 ${located.length} 个点位。未取得可匹配的原始点位，直接按上传数据分析。`;
+      return;
+    }
     pointComparison.value = comparison;
     uploadedPoints.value = uploaded.points;
     supplementFile.value = file;
@@ -1157,9 +1186,9 @@ async function confirmScope() {
           <template v-else-if="stage === 3">
             <div class="wrfx-intro-label"><span></span>第三步 · 数据核对</div>
             <h2>核对区域数据来源</h2>
-            <p class="wrfx-intro-copy">请选择本次分析采用的数据。上传 Excel 后，系统按点位序号对比三项指标并提示差异。</p>
+            <p class="wrfx-intro-copy">请选择本次分析采用的数据。上传 Excel 后，如有可匹配的原始点位则核对差异；否则直接使用上传数据分析。</p>
             <div class="wrfx-check-context"><b><PhMapPin />{{ confirmedData?.scope.name }}</b><span>{{ formattedArea }} · {{ confirmedData?.plots.length || 0 }} 个耕地图斑</span><small><PhCheckCircle />{{ dataCheckNotice || '边界、耕地图斑和调查信息已缓存到本机浏览器。' }}</small></div>
-            <div class="wrfx-ai-note"><PhDatabase /><span><b>数据核对助手</b><small>上传补充数据后，按点位序号核对原系统的土壤镉、水稻镉和土壤砷。</small></span></div>
+            <div class="wrfx-ai-note"><PhDatabase /><span><b>数据核对助手</b><small>可匹配原始点位时核对土壤镉、水稻镉和土壤砷；自定义范围直接读取 Excel。</small></span></div>
             <h3 class="wrfx-check-title">数据来源选择（按优先级）</h3>
             <div class="wrfx-source-options">
               <button type="button" role="radio" :aria-checked="dataSource==='latest'" :class="{ selected: dataSource==='latest' }" @click="selectDataSource('latest')"><b>1</b><span><strong>最新调查数据</strong><small>优先采用 · {{ questionnaireAnswers.surveyYear || '当前年度' }}年调查</small></span><i>{{ dataSource==='latest' ? '●' : '○' }}</i></button>
